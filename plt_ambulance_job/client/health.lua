@@ -17,6 +17,7 @@ local isPatientBandaged = false
 local isDowned = false
 local downedAt = 0
 local downedByCurrentEvent = false
+local finishPending = false
 local medicalState = Framework.MedicalState.ALIVE
 local downedSince = 0
 local isBleedingOut = false
@@ -1283,7 +1284,10 @@ local function enterDownedState()
     end
 
     isDowned = true
-downedAt = GetGameTimer()    knockoutTimer = 0
+
+    downedAt = GetGameTimer()
+
+    knockoutTimer = 0
 
     applyDeadRestrictions(true)
 
@@ -1750,7 +1754,8 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
 
         -- Finished players stay lifeless: never play the downed animation.
         if GetGameTimer() >= knockoutTimer and not isBeingTreated
-            and not finishedPlayers[GetPlayerServerId(PlayerId())] then
+            and not finishedPlayers[GetPlayerServerId(PlayerId())]
+            and not finishPending then
             SetEntityVelocity(victim, 0.0, 0.0, 0.0)
             playDownedAnimation(victim)
         end
@@ -1803,7 +1808,10 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
     end
 
     isDowned = true
-downedAt = GetGameTimer()    downedByCurrentEvent = true
+
+    downedAt = GetGameTimer()
+
+    downedByCurrentEvent = true
 
     pushMedicalState(Framework.MedicalState.LASTSTAND)
 
@@ -1829,6 +1837,13 @@ downedAt = GetGameTimer()    downedByCurrentEvent = true
         if not isDowned or fractureTimer ~= sequence or isKnockoutActive() then
             return
         end
+    end
+
+    -- If the mercy handler already finished us for this shot (one-shot head
+    -- shot), do NOT resurrect / re-pose the body - the finished enforcement
+    -- loop owns the body now.
+    if finishPending or isSelfFinished() then
+        return
     end
 
     -- Capture again right before the resurrection (it may clear the bone).
@@ -1867,7 +1882,7 @@ CreateThread(function()
 
             if DoesEntityExist(ped) and (IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 100) then
                 isDowned = true
-downedAt = GetGameTimer()
+                downedAt = GetGameTimer()
                 pushMedicalState(Framework.MedicalState.LASTSTAND)
 
                 fractureTimer = fractureTimer + 1
@@ -1959,6 +1974,9 @@ local function revivePlayer()
     isDeathScreenOpen = true
     lastBleedTick = GetGameTimer()
     isDowned = false
+    finishPending = false
+
+    DisablePlayerFiring(PlayerId(), false)
 
     applyDeadRestrictions(false)
 
@@ -2246,7 +2264,7 @@ local function setDeathStatus(downed, skipStatePush)
     end
 
     isDowned = true
-downedAt = GetGameTimer()
+    downedAt = GetGameTimer()
     if not skipStatePush then
         pushMedicalState(Framework.MedicalState.LASTSTAND)
     end
@@ -2337,7 +2355,7 @@ RegisterNetEvent('amb_client:KillPlayer', function()
     setKnockoutFor(0)
 
     isDowned = true
-downedAt = GetGameTimer()
+    downedAt = GetGameTimer()
     pushMedicalState(Framework.MedicalState.LASTSTAND)
 
     fractureTimer = fractureTimer + 1
@@ -3058,7 +3076,7 @@ RegisterCommand('hungerdie', function()
     local ped = PlayerPedId()
 
     isDowned = true
-downedAt = GetGameTimer()
+    downedAt = GetGameTimer()
     pushMedicalState(Framework.MedicalState.LASTSTAND)
 
     injuries.right_arm.level = 2
@@ -3211,7 +3229,10 @@ local function forceDownedForFinish()
     local ped = PlayerPedId()
 
     isDowned = true
-downedAt = GetGameTimer()    pushMedicalState(Framework.MedicalState.LASTSTAND)
+
+    downedAt = GetGameTimer()
+
+    pushMedicalState(Framework.MedicalState.LASTSTAND)
 
     fractureTimer = fractureTimer + 1
     knockoutTimer = 0
@@ -3253,7 +3274,9 @@ local function getLastDamageBone(ped)
 end
 
 local function triggerFinish(reason)
-    if finishedPlayers[GetPlayerServerId(PlayerId())] then
+    local myId = GetPlayerServerId(PlayerId())
+
+    if finishedPlayers[myId] then
         return
     end
 
@@ -3261,9 +3284,10 @@ local function triggerFinish(reason)
         forceDownedForFinish()
     end
 
-    if Config.Debug then
-        print(('^1[MERCY]^7 finish triggered: %s'):format(tostring(reason)))
-    end
+    finishPending = true
+
+    print(('^1[MERCY]^7 finish triggered: %s (serverId %s)'):format(
+        tostring(reason), tostring(myId)))
 
     TriggerServerEvent('amb_server:finishPlayer')
 end
@@ -3273,55 +3297,60 @@ AddEventHandler('gameEventTriggered', function(name, args)
         return
     end
 
-    -- The same event that just downed us must not finish us too (except for
-    -- head shots - see below).
-    local wasDowningEvent = downedByCurrentEvent
-    downedByCurrentEvent = false
+    local ok, err = pcall(function()
+        -- The same event that just downed us must not finish us too (except
+        -- for head shots - see below).
+        local wasDowningEvent = downedByCurrentEvent
+        downedByCurrentEvent = false
 
-    local ped = PlayerPedId()
-    local myId = GetPlayerServerId(PlayerId())
+        local ped = PlayerPedId()
+        local myId = GetPlayerServerId(PlayerId())
 
-    if finishedPlayers[myId] or isCarried or isBeingTreated then
-        return
-    end
+        if finishedPlayers[myId] or isCarried or isBeingTreated then
+            return
+        end
 
-    -- FiveM passes game event arguments as a NUMERIC table:
-    -- [1] victim, [2] attacker, [4] isFatal, [7] weapon hash.
-    local victim = args and args[1]
+        -- FiveM passes game event arguments as a NUMERIC table:
+        -- [1] victim, [2] attacker, [4] isFatal, [7] weapon hash.
+        local victim = args and args[1]
 
-    if not victim or victim ~= ped then
-        return
-    end
+        if not victim or victim ~= ped then
+            return
+        end
 
-    -- Prefer the values captured synchronously by the downing handler for
-    -- THIS event; fall back to a fresh read (with a short retry) if needed.
-    local bonePart = lastDamageBonePart
-    local weaponHash = lastDamageWeaponHash
-    lastDamageBonePart = nil
-    lastDamageWeaponHash = 0
+        -- Prefer the values captured synchronously by the downing handler for
+        -- THIS event; fall back to a fresh read (with a short retry).
+        local bonePart = lastDamageBonePart
+        local weaponHash = lastDamageWeaponHash
+        lastDamageBonePart = nil
+        lastDamageWeaponHash = 0
 
-    if not weaponHash or weaponHash == 0 then
-        weaponHash = args and tonumber(args[7]) or 0
-    end
+        if not weaponHash or weaponHash == 0 then
+            weaponHash = args and tonumber(args[7]) or 0
+        end
 
-    if not bonePart then
-        local bone = getLastDamageBone(ped)
-        bonePart = bone and BONE_TO_PART[bone] or nil
-    end
+        if not bonePart then
+            local bone = getLastDamageBone(ped)
+            bonePart = bone and BONE_TO_PART[bone] or nil
+        end
 
-    local isBullet = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
+        local isBullet = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
 
-    -- ONE-SHOT: a bullet to the head finishes the player instantly, even at
-    -- full HP. Completely dead - no revive, no unconscious phase at all.
-    -- While already downed, ANY hit to the head (including melee) finishes.
-    if bonePart == 'head' and (isDowned or isBullet) then
-        triggerFinish('headshot')
-        return
-    end
+        -- ONE-SHOT: a bullet to the head finishes the player instantly, even
+        -- at full HP. While already downed, ANY hit to the head (melee too).
+        if bonePart == 'head' and (isDowned or isBullet) then
+            triggerFinish('headshot')
+            return
+        end
 
-    -- Any other damage while downed (the 1% HP lost) finishes the player too.
-    if isDowned and not wasDowningEvent then
-        triggerFinish('damage while downed')
+        -- Any other damage while downed (the 1% HP lost) finishes too.
+        if isDowned and not wasDowningEvent then
+            triggerFinish('damage while downed')
+        end
+    end)
+
+    if not ok then
+        print(('^1[MERCY]^7 gameEvent handler error: %s'):format(tostring(err)))
     end
 end)
 
@@ -3334,40 +3363,86 @@ end)
     a fallback for the finish rules.
 ]]
 AddEventHandler('entityDamaged', function(victim, culprit, weapon, baseDamage)
-    local ped = PlayerPedId()
-    local myId = GetPlayerServerId(PlayerId())
+    local ok, err = pcall(function()
+        local ped = PlayerPedId()
+        local myId = GetPlayerServerId(PlayerId())
 
-    if finishedPlayers[myId] or isCarried or isBeingTreated then
-        return
-    end
-
-    if not victim or victim ~= ped then
-        return
-    end
-
-    if not isDowned then
-        -- While alive, only a bullet to the head is an instant finish.
-        local weaponHash = tonumber(weapon) or 0
-        local isBullet = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
-
-        if not isBullet then
+        if finishedPlayers[myId] or isCarried or isBeingTreated then
             return
         end
 
-        local bone = getLastDamageBone(ped)
-
-        if bone and BONE_TO_PART[bone] == 'head' then
-            triggerFinish('headshot (entityDamaged)')
+        if not victim or victim ~= ped then
+            return
         end
 
-        return
-    end
+        local weaponHash = tonumber(weapon) or 0
 
-    -- While downed, ANY further damage finishes the player. The very hit that
-    -- downed us is ignored so the unconscious phase survives.
-    if GetGameTimer() - downedAt < 2000 then
-        return
-    end
+        if not isDowned then
+            -- While alive, only a bullet to the head is an instant finish.
+            local isBullet = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
 
-    triggerFinish('damage while downed (entityDamaged)')
+            if not isBullet then
+                return
+            end
+
+            -- The bone read can lag one frame; retry briefly in a thread and
+            -- then finish if it was the head.
+            CreateThread(function()
+                local bone
+
+                for _ = 1, 10 do
+                    Wait(0)
+
+                    local found, boneId = GetPedLastDamageBone(PlayerPedId())
+
+                    if found and boneId and boneId ~= 0 then
+                        bone = boneId
+                        break
+                    end
+                end
+
+                if bone and BONE_TO_PART[bone] == 'head' then
+                    triggerFinish('headshot (entityDamaged)')
+                end
+            end)
+
+            return
+        end
+
+        -- While downed, ANY further real damage finishes the player. The very
+        -- hit that downed us is ignored so the unconscious phase survives.
+        if (tonumber(baseDamage) or 0) <= 0 then
+            return
+        end
+
+        if weaponHash == 0 then
+            return
+        end
+
+        if GetGameTimer() - downedAt < 2500 then
+            return
+        end
+
+        triggerFinish('damage while downed (entityDamaged)')
+    end)
+
+    if not ok then
+        print(('^1[MERCY]^7 entityDamaged handler error: %s'):format(tostring(err)))
+    end
 end)
+
+-- Debug helpers -------------------------------------------------------------
+
+-- /mercytest  - force the whole finish pipeline for the player who runs it
+--               (downed pose + server finish + 10 minute timer).
+-- /mercyreset - clear the finished state and stand the player back up so the
+--               system can be tested again.
+RegisterCommand('mercytest', function()
+    print('^1[MERCY TEST]^7 forcing finish pipeline...')
+    triggerFinish('mercytest command')
+end, false)
+
+RegisterCommand('mercyreset', function()
+    print('^1[MERCY TEST]^7 requesting finish state clear...')
+    TriggerServerEvent('amb_server:clearFinished')
+end, false)

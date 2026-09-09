@@ -92,6 +92,8 @@ local function hospitalRespawn(src)
     end)
 
     TriggerClientEvent('amb_client:finishedRespawn', src)
+
+    print(('^2[Mercy]^7 Player %s hospital respawn: inventory wiped, revived and teleported.'):format(tostring(src)))
 end
 
 RegisterNetEvent('amb_server:finishPlayer', function()
@@ -128,4 +130,23 @@ RegisterNetEvent('amb_server:finishPlayer', function()
     SetTimeout(respawnSeconds() * 1000, function()
         hospitalRespawn(src)
     end)
+end)
+
+-- Debug helper: clears the finished state of the calling player and stands
+-- them back up (used together with the client /mercyreset command while
+-- testing the system).
+RegisterNetEvent('amb_server:clearFinished', function()
+    local src = source
+
+    finishedPlayers[src] = nil
+
+    broadcastFinished(src, false)
+
+    pcall(function()
+        exports.plt_ambulance_job:InternalRevive(src)
+    end)
+
+    Framework.Notify(src, 'Mercy finished state cleared (debug).', 'success')
+
+    print(('^2[Mercy]^7 Player %s finished state cleared (debug).'):format(tostring(src)))
 end)

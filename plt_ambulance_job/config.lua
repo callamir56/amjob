@@ -1,6 +1,8 @@
 Config = {}
 
-Config.Debug = false
+-- Full console logging for the mercy/finish and health systems. Keep it true
+-- while testing; set to false in production.
+Config.Debug = true
 
 -- Which framework this build targets. Set to the resource name that is started
 -- on your server. On an ESX server this must be "es_extended".
