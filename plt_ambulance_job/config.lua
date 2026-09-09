@@ -194,7 +194,8 @@ Config.ClothingRemoval = {
 }
 
 Config.Deathscreen = {
-    UseBuiltIn = true
+    -- Built-in death screen stays off while the death system is removed.
+    UseBuiltIn = false
 }
 
 Config.LocalDoctor = {
@@ -246,51 +247,20 @@ Config.Carry = {
 
 --[[
     ------------------------------------------------------------------
-    REBUILT DEATH SYSTEM (client/death.lua + server/death.lua)
+    DEATH SYSTEM: REMOVED / DISABLED
     ------------------------------------------------------------------
-    A fully self-contained death system. It does NOT rely on FiveM's
-    damage events (they are unreliable): instead it watches the player's
-    health every frame, exactly like the GTA engine does.
+    Set this to true while the resource must NOT touch death at all.
 
-    Rules:
-      * One bullet to the head = finished instantly (from ANY state, even
-        full HP). No unconscious phase, no revive - completely dead.
-      * A fatal body hit = downed (unconscious) with 1% HP pinned.
-      * ANY further damage while downed (bullet, kick, vehicle, anything)
-        = finished for good.
-      * Finished: the body lies lifeless with NO animation, every control
-        is locked, medics cannot revive (body bag only), a 10 minute timer
-        runs and the player respawns in front of the hospital with their
-        entire ox_inventory wiped.
+    With it enabled:
+      * no downed / unconscious state (nothing is pinned or forced);
+      * no death screen, no EMS auto call, no hospital transport;
+      * no finish / mercy logic, no 10 minute timer, no inventory wipe;
+      * medics cannot revive or body-bag (no player is ever downed);
+      * death behaves exactly like vanilla GTA / your framework default.
+
+    Set it back to false only once the new death system is implemented.
 ]]
-Config.DeathSystem = {
-    Enabled = true,
-    -- The new system fully owns the downed / finished states. The old
-    -- health.lua downed handling is switched off to avoid conflicts.
-    OwnDownedState = true,
-    -- Health a downed player is pinned at (must stay above 100).
-    DownedHealth = 110,
-    -- Below this health the player is downed (same as the old system).
-    DownedThreshold = 125,
-    -- A non-fatal head hit must deal at least this much damage to finish.
-    MinAliveHeadshotDamage = 40,
-    -- Seconds until a finished player respawns at the hospital.
-    RespawnSeconds = 600,
-    -- Ignore all damage for this long after spawning in (ms).
-    SpawnGraceMs = 10000,
-}
-
--- Mercy (finished) extras. Config.Mercy is still read by the server for
--- the inventory behaviour on hospital respawn.
-Config.Mercy = {
-    Enabled = true,
-    -- Fallback hospital spawn when no check-in bed is configured.
-    HospitalCoords = { x = 307.7, y = -590.8, z = 43.3, h = 0.0 },
-    -- Wipe the player's entire ox_inventory when the mercy timer ends.
-    ClearInventory = true,
-    -- Legacy behaviour: drop the inventory at the body instead of wiping it.
-    DropInventory = false,
-}
+Config.DisableDeathSystem = true
 
 Config.ShowFakePlayers = true
 Config.FakePlayers = {

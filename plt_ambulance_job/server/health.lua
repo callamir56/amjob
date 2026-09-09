@@ -249,6 +249,12 @@ local searchCooldown = {}
 RegisterNetEvent('amb_server:SetDowned', function(downed)
     local src = source
 
+    -- The death system is removed: no downed state is ever written.
+    if Config.DisableDeathSystem == true then
+        broadcastDowned(src, false)
+        return
+    end
+
     if Framework.HasAuthoritativeMedicalState() then
         local state = Framework.GetMedicalState(src)
 
@@ -275,6 +281,12 @@ end)
 -- per-searcher cooldown so it cannot be spammed.
 RegisterNetEvent('amb_server:searchDowned', function(targetId)
     local src = source
+
+    -- The death system is removed: nobody can be downed, so nothing to search.
+    if Config.DisableDeathSystem == true then
+        Framework.Notify(src, _L('target_not_downed'), 'error')
+        return
+    end
 
     targetId = tonumber(targetId)
 
@@ -361,6 +373,11 @@ RegisterNetEvent('amb_server:dropCarried', function(targetId)
 end)
 
 RegisterNetEvent('amb_server:SetMedicalState', function(requestedState)
+    -- The death system is removed: no medical death state is ever written.
+    if Config.DisableDeathSystem == true then
+        return
+    end
+
     if not Framework.HasAuthoritativeMedicalState() then
         return
     end
@@ -387,6 +404,11 @@ RegisterNetEvent('amb_server:SetMedicalState', function(requestedState)
 end)
 
 RegisterNetEvent('hospital:server:SetDeathStatus', function(isDead)
+    -- The death system is removed: no death status is ever written.
+    if Config.DisableDeathSystem == true then
+        return
+    end
+
     if Framework.Type ~= 'qb' then
         return
     end
@@ -402,6 +424,11 @@ RegisterNetEvent('hospital:server:SetDeathStatus', function(isDead)
 end)
 
 RegisterNetEvent('hospital:server:SetLaststandStatus', function(inLaststand)
+    -- The death system is removed: no last-stand status is ever written.
+    if Config.DisableDeathSystem == true then
+        return
+    end
+
     if Framework.Type ~= 'qb' then
         return
     end
@@ -435,6 +462,11 @@ end)
 
 RegisterNetEvent('amb_server:pronounceWithBodyBag', function(targetId)
     local src = source
+
+    -- The death system is removed: no downed players, so no body bags.
+    if Config.DisableDeathSystem == true then
+        return
+    end
 
     targetId = tonumber(targetId)
 

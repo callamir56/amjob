@@ -52,6 +52,10 @@ local crutchProp = nil
 local spawnManagerDisabled = false
 
 local function pushMedicalState(state)
+    if Config.DisableDeathSystem == true then
+        return
+    end
+
     if Framework and Framework.HasAuthoritativeMedicalState() then
         TriggerServerEvent('amb_server:SetMedicalState', Framework.NormalizeMedicalState(state))
         return
@@ -75,6 +79,10 @@ local function requestMedicalStateSync()
 end
 
 local function disableAutoSpawn()
+    if Config.DisableDeathSystem == true then
+        return
+    end
+
     if not (Framework and Framework.Type == 'qb') then
         return
     end
@@ -616,6 +624,10 @@ local function getDeathTypeFromWeapon(weaponHash)
 end
 
 local function isDownedByHealth(ped, forced)
+    if Config.DisableDeathSystem == true then
+        return false
+    end
+
     local threshold = tonumber(Config.Health and Config.Health.DownedThreshold) or 0
     local health = GetEntityHealth(ped)
     local isForced = forced == true or forced == 1
@@ -1241,10 +1253,8 @@ RegisterNetEvent('amb_client:setCarried', function(state, carrierSrc)
 end)
 
 local function shouldEnforceDownedState()
-    -- The rebuilt death system (client/death.lua) owns the downed and
-    -- finished poses; the legacy enforcement must not fight it.
-    if Config.DeathSystem and Config.DeathSystem.Enabled ~= false
-        and Config.DeathSystem.OwnDownedState == true then
+    -- The death system is removed: no downed pose is ever enforced.
+    if Config.DisableDeathSystem == true then
         return false
     end
 
@@ -1684,46 +1694,9 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
         return
     end
 
-    if Config.DeathSystem and Config.DeathSystem.Enabled ~= false
-        and Config.DeathSystem.OwnDownedState == true then
-        -- The rebuilt death system (client/death.lua) owns the downed and
-        -- finished states. Only the injury tracking stays here.
-        local part = getDamagedPart(victim)
-
-        if part then
-            injuries[part].level = math.min(Config.Health.MaxInjuryLevel or 5, injuries[part].level + 1)
-
-            local isFall, isVehicle = getDamageContext(victim, weaponHash, attacker)
-
-            if isFall or isVehicle then
-                if isFall then
-                    local legPart = math.random(1, 2) == 1 and 'left_leg' or 'right_leg'
-
-                    if not tryFracture(legPart, 'fall') then
-                        tryFracture(part, 'fall_fallback')
-                    end
-                else
-                    tryFracture(part, 'vehicle')
-                end
-            end
-
-            local isBulletWound = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
-
-            if isBulletWound then
-                injuries[part].bullet = true
-            end
-
-            local bleedChance = isBulletWound
-                and (Config.Health.BulletBleedChance or 90)
-                or (Config.Health.BleedChance or 40)
-
-            if bleedChance > math.random(1, 100) then
-                injuries.bleeding = injuries.bleeding + 1
-            end
-
-            syncInjuries()
-        end
-
+    -- The death system is removed: this resource does not react to damage at
+    -- all (no injuries, no downed state, no death handling).
+    if Config.DisableDeathSystem == true then
         return
     end
 
@@ -1827,10 +1800,8 @@ CreateThread(function()
     while true do
         Wait(250)
 
-        if Config.DeathSystem and Config.DeathSystem.Enabled ~= false
-        and Config.DeathSystem.OwnDownedState == true then
-            -- The rebuilt death system (client/death.lua) handles all death
-            -- detection; this legacy fallback detector stays dormant.
+        if Config.DisableDeathSystem == true then
+            -- The death system is removed: nothing to detect here.
         elseif not isDowned and not isKnockoutActive() and not areActionsBlocked() then
             local ped = PlayerPedId()
 
@@ -2204,19 +2175,7 @@ local function setDeathStatus(downed, skipStatePush)
         return
     end
 
-    if Config.DeathSystem and Config.DeathSystem.Enabled ~= false
-        and Config.DeathSystem.OwnDownedState == true then
-        -- The rebuilt death system (client/death.lua) owns the pose and the
-        -- health; here only the bookkeeping is kept in sync. This runs before
-        -- the legacy framework guards so it also works on QBCore.
-        isDowned = true
-
-        applyDeadRestrictions(true)
-
-        if not skipStatePush then
-            pushMedicalState(Framework.MedicalState.LASTSTAND)
-        end
-
+    if Config.DisableDeathSystem == true then
         return
     end
 
@@ -2284,6 +2243,12 @@ end)
 RegisterNetEvent('amb_client:SetDeathStatus', setDeathStatus)
 
 RegisterNetEvent('amb_client:syncMedicalState', function(state, elapsed)
+    -- The death system is removed: never touch the medical state, never
+    -- resurrect (this would fight the framework's default death handling).
+    if Config.DisableDeathSystem == true then
+        return
+    end
+
     if not Framework.HasAuthoritativeMedicalState() then
         return
     end
