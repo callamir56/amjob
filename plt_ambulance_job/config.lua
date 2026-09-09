@@ -244,16 +244,46 @@ Config.Carry = {
     Enabled = true,
 }
 
--- Mercy / "finished" system.
--- A downed player who is shot in the head, kicked / melee-hit, run over by a
--- vehicle or hit by ANY other damage is "finished": medics can no longer
--- revive them (only body-bag), their dispatch calls close, a 10 minute timer
--- runs, and when it ends their whole ox_inventory is wiped and they respawn
--- at the hospital.
+--[[
+    ------------------------------------------------------------------
+    REBUILT DEATH SYSTEM (client/death.lua + server/death.lua)
+    ------------------------------------------------------------------
+    A fully self-contained death system. It does NOT rely on FiveM's
+    damage events (they are unreliable): instead it watches the player's
+    health every frame, exactly like the GTA engine does.
+
+    Rules:
+      * One bullet to the head = finished instantly (from ANY state, even
+        full HP). No unconscious phase, no revive - completely dead.
+      * A fatal body hit = downed (unconscious) with 1% HP pinned.
+      * ANY further damage while downed (bullet, kick, vehicle, anything)
+        = finished for good.
+      * Finished: the body lies lifeless with NO animation, every control
+        is locked, medics cannot revive (body bag only), a 10 minute timer
+        runs and the player respawns in front of the hospital with their
+        entire ox_inventory wiped.
+]]
+Config.DeathSystem = {
+    Enabled = true,
+    -- The new system fully owns the downed / finished states. The old
+    -- health.lua downed handling is switched off to avoid conflicts.
+    OwnDownedState = true,
+    -- Health a downed player is pinned at (must stay above 100).
+    DownedHealth = 110,
+    -- Below this health the player is downed (same as the old system).
+    DownedThreshold = 125,
+    -- A non-fatal head hit must deal at least this much damage to finish.
+    MinAliveHeadshotDamage = 40,
+    -- Seconds until a finished player respawns at the hospital.
+    RespawnSeconds = 600,
+    -- Ignore all damage for this long after spawning in (ms).
+    SpawnGraceMs = 10000,
+}
+
+-- Mercy (finished) extras. Config.Mercy is still read by the server for
+-- the inventory behaviour on hospital respawn.
 Config.Mercy = {
     Enabled = true,
-    -- Seconds until a finished player respawns at the hospital (10 minutes).
-    RespawnSeconds = 600,
     -- Fallback hospital spawn when no check-in bed is configured.
     HospitalCoords = { x = 307.7, y = -590.8, z = 43.3, h = 0.0 },
     -- Wipe the player's entire ox_inventory when the mercy timer ends.

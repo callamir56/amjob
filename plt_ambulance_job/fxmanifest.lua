@@ -63,6 +63,7 @@ client_scripts {
     'client/dispatch.lua',
     'client/downed_actions.lua',
     'client/deathscreen.lua',
+    'client/death.lua',
     'client/medical_bag.lua',
     'client/pharmacy.lua',
     'client/compat_exports.lua'
@@ -83,7 +84,7 @@ server_scripts {
     'server/diagnosis.lua',
     'server/dispatch.lua',
     'server/deathscreen.lua',
-    'server/mercy.lua',
+    'server/death.lua',
     'server/medical_bag.lua',
     'server/pharmacy.lua',
     'server/compat_exports.lua'

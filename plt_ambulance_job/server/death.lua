@@ -1,30 +1,34 @@
 --[[
-    ------------------------------------------------------------
-    Mercy / "finished" system (server side)
-    ------------------------------------------------------------
-    A downed player who is shot in the head, kicked / melee-hit, run over by a
-    vehicle or hit by ANY other damage is "finished". While finished:
+    ------------------------------------------------------------------
+    PLT AMBULANCE - DEATH SYSTEM (rebuilt, server side)
+    ------------------------------------------------------------------
+    The server stays authoritative about the finished state:
 
-    * medics CANNOT revive them - every revive attempt is refused with an error
-      notification; the only thing EMS can do is body-bag the body;
-    * their dispatch calls are closed so no medic is navigated to a corpse;
-    * a timer (Config.Mercy.RespawnSeconds, 10 minutes by default) runs; when it
-      ends, everything in the player's ox_inventory is wiped (or dropped at the
-      body if Config.Mercy.DropInventory = true) and the player is revived and
-      respawned at the hospital.
+      * marks the player finished (medics can only body-bag, every revive
+        is refused);
+      * closes the player's dispatch calls;
+      * runs the hospital timer (Config.DeathSystem.RespawnSeconds, 10
+        minutes by default);
+      * when the timer ends: wipes the player's ENTIRE ox_inventory,
+        revives them and respawns them at the hospital.
 
-    The damage detection happens on the patient's own client (it knows what hit
-    it); the server stays authoritative about the state change.
+    Events / exports (same names as before so nothing else breaks):
+      client -> 'amb_server:finishPlayer'
+      export    IsPlayerFinished(src)
+      broadcast 'amb_client:syncFinishedPlayer'
 ]]
 
 local finishedPlayers = {}
 
-local function mercyEnabled()
-    return not (Config.Mercy and Config.Mercy.Enabled == false)
+local function deathSystemEnabled()
+    return not (Config.DeathSystem and Config.DeathSystem.Enabled == false)
 end
 
 local function respawnSeconds()
-    return math.max(30, tonumber(Config.Mercy and Config.Mercy.RespawnSeconds) or 600)
+    local seconds = (Config.DeathSystem and Config.DeathSystem.RespawnSeconds)
+        or (Config.Mercy and Config.Mercy.RespawnSeconds)
+
+    return math.max(30, tonumber(seconds) or 600)
 end
 
 local function isFinished(src)
@@ -63,10 +67,9 @@ local function hospitalRespawn(src)
         return
     end
 
-    -- Wipe the player's entire ox_inventory before they leave. Everything they
-    -- were carrying is gone. Set Config.Mercy.DropInventory = true to keep the
-    -- old behaviour of dropping the items at the body instead (or
-    -- Config.Mercy.ClearInventory = false to keep the items).
+    -- Wipe the player's ENTIRE ox_inventory. Everything they were carrying is
+    -- gone. Config.Mercy.DropInventory = true keeps the old behaviour of
+    -- dropping the items at the body instead.
     if GetResourceState('ox_inventory') == 'started' then
         if Config.Mercy and Config.Mercy.DropInventory == true then
             pcall(function()
@@ -85,21 +88,22 @@ local function hospitalRespawn(src)
 
     broadcastFinished(src, false)
 
-    -- Revive first (clears downed/medical state), then let the client move the
-    -- player to the hospital and play the wake-up animation.
+    -- Revive first (clears the downed / medical state), then the client moves
+    -- the player to the hospital and plays the wake-up animation.
     pcall(function()
         exports.plt_ambulance_job:InternalRevive(src)
     end)
 
     TriggerClientEvent('amb_client:finishedRespawn', src)
 
-    print(('^2[Mercy]^7 Player %s hospital respawn: inventory wiped, revived and teleported.'):format(tostring(src)))
+    print(('^2[DEATH]^7 Player %s hospital respawn: inventory wiped, revived and teleported.'):format(
+        tostring(src)))
 end
 
 RegisterNetEvent('amb_server:finishPlayer', function()
     local src = source
 
-    if not mercyEnabled() then
+    if not deathSystemEnabled() then
         return
     end
 
@@ -108,6 +112,13 @@ RegisterNetEvent('amb_server:finishPlayer', function()
     end
 
     if not exports.plt_ambulance_job:IsPlayerDowned(src) then
+        -- The client sends the downed state and the finish event back to back;
+        -- if they arrive out of order the client steps back to downed and can
+        -- simply be hit again.
+        TriggerClientEvent('amb_client:finishRefused', src)
+
+        print(('^3[DEATH]^7 Player %s finish refused: not downed.'):format(tostring(src)))
+
         return
     end
 
@@ -124,7 +135,7 @@ RegisterNetEvent('amb_server:finishPlayer', function()
         minutes = math.floor(respawnSeconds() / 60)
     }), 'error')
 
-    print(('^2[Mercy]^7 Player %s was FINISHED. Hospital respawn in %ss.'):format(
+    print(('^2[DEATH]^7 Player %s was FINISHED. Hospital respawn in %ss.'):format(
         tostring(src), respawnSeconds()))
 
     SetTimeout(respawnSeconds() * 1000, function()
@@ -133,8 +144,7 @@ RegisterNetEvent('amb_server:finishPlayer', function()
 end)
 
 -- Debug helper: clears the finished state of the calling player and stands
--- them back up (used together with the client /mercyreset command while
--- testing the system).
+-- them back up (used with the client /mercyreset command while testing).
 RegisterNetEvent('amb_server:clearFinished', function()
     local src = source
 
@@ -146,7 +156,7 @@ RegisterNetEvent('amb_server:clearFinished', function()
         exports.plt_ambulance_job:InternalRevive(src)
     end)
 
-    Framework.Notify(src, 'Mercy finished state cleared (debug).', 'success')
+    Framework.Notify(src, 'Death state cleared (debug).', 'success')
 
-    print(('^2[Mercy]^7 Player %s finished state cleared (debug).'):format(tostring(src)))
+    print(('^2[DEATH]^7 Player %s finished state cleared (debug).'):format(tostring(src)))
 end)
