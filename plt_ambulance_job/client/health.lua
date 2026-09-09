@@ -1037,8 +1037,13 @@ end
 local function applyDownedProofs(ped)
     proofsApplied = true
 
+    -- Keep the downed player alive with invincibility only. The full
+    -- SetEntityProofs block was removed on purpose: it swallows damage events
+    -- completely (bullets would never register a hit), which made the mercy /
+    -- finish system unable to detect the finishing shot. With plain
+    -- invincibility the damage is zeroed but CEventNetworkEntityDamage still
+    -- fires, so head shots / any damage while downed can finish the player.
     SetEntityInvincible(ped, true)
-    SetEntityProofs(ped, true, true, true, true, true, true, true, true)
 end
 
 local function clearDownedProofs(ped)
@@ -1330,10 +1335,13 @@ local function enforceFinishedPose(ped)
         SetPedCanRagdoll(ped, true)
         SetPedCanRagdollFromPlayerImpact(ped, true)
 
-        -- No animation: keep the body ragdolled on the ground. Whenever the
-        -- ragdoll settles (or the ped tries to stand up) force it back down.
-        if not IsPedRagdoll(ped) then
-            SetPedToRagdoll(ped, 3000, 3000, 1, false, false, false)
+        -- No animation at all: keep the body lying lifeless. Only re-apply
+        -- the ragdoll if the ped actually tries to move or stand up (a long
+        -- duration avoids the body twitching every few seconds).
+        if not IsPedRagdoll(ped)
+            and (IsPedGettingUp(ped) or IsPedWalking(ped) or IsPedRunning(ped)
+                or GetEntitySpeed(ped) > 0.5) then
+            SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
         end
     end
 end
@@ -1706,6 +1714,12 @@ local function playDownedAnimation(ped)
     end
 end
 
+-- The last-damage bone can lag one frame behind the damage event, so the
+-- downing handler below captures it synchronously for the mercy handler that
+-- runs on the same event dispatch.
+local lastDamageBonePart = nil
+local lastDamageWeaponHash = 0
+
 AddEventHandler('gameEventTriggered', function(eventName, args)
     if eventName ~= 'CEventNetworkEntityDamage' then
         return
@@ -1719,6 +1733,11 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
     if victim ~= PlayerPedId() then
         return
     end
+
+    -- Fresh, current-event capture for the mercy (finish) handler.
+    local found, bone = GetPedLastDamageBone(victim)
+    lastDamageBonePart = (found and bone and BONE_TO_PART[bone]) or nil
+    lastDamageWeaponHash = tonumber(weaponHash) or 0
 
     if isKnockoutActive() or areActionsBlocked() then
         return
@@ -3141,9 +3160,12 @@ RegisterNetEvent('amb_client:syncFinishedPlayer', function(src, state)
         local ped = PlayerPedId()
 
         if ped and ped ~= 0 and DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false) then
+            -- Drop lifeless on the ground: stop whatever pose is playing and
+            -- ragdoll with no animation at all.
+            ClearPedTasksImmediately(ped)
             SetPedCanRagdoll(ped, true)
             SetPedCanRagdollFromPlayerImpact(ped, true)
-            SetPedToRagdoll(ped, 3000, 3000, 1, false, false, false)
+            SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
         end
     end
 end)
@@ -3151,30 +3173,83 @@ end)
 --[[
     Mercy / "finished" damage detection.
 
-    While downed the player is kept alive by a sliver of health (1%). ANY
-    damage that lands on that sliver - another bullet (head shot included), a
-    kick, being run over by a car, an explosion, a fall - finishes the player
-    for good: the server marks them, medics can only body-bag the body and a
-    10 minute hospital timer starts.
+    ONE-SHOT rule: a bullet to the head finishes the player instantly, from
+    ANY state - full HP or already downed. There is no unconscious phase for
+    head shots: the player completely dies on the spot.
 
-    The only exceptions: the very shot that downed the player (they still get
-    the unconscious phase) - unless it was a head shot, which finishes them
-    instantly - and damage received while EMS is carrying / treating them.
+    While downed the player is kept alive by a sliver of health (1%). ANY
+    other damage that lands on that sliver - another bullet, a kick, being
+    run over by a car, an explosion, a fall - finishes the player for good:
+    the server marks them, medics can only body-bag the body and a 10 minute
+    hospital timer starts.
+
+    The only exceptions: the very hit that downed the player (they still get
+    the unconscious phase) and damage received while EMS is carrying or
+    treating them.
 ]]
+
+-- Force the downed state immediately (used by the one-shot head shot when the
+-- player is not downed yet). The server requires the player to be downed
+-- before it accepts the finish.
+local function forceDownedForFinish()
+    local ped = PlayerPedId()
+
+    isDowned = true
+    pushMedicalState(Framework.MedicalState.LASTSTAND)
+
+    fractureTimer = fractureTimer + 1
+    knockoutTimer = 0
+
+    if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
+        ped = resurrectPlayer(ped)
+    end
+
+    setDownedHealth(ped)
+    applyDownedProofs(ped)
+
+    -- Drop lifeless immediately: no animation, just the body on the ground.
+    if not IsPedInAnyVehicle(ped, false) then
+        ClearPedTasksImmediately(ped)
+
+        SetPedCanRagdoll(ped, true)
+        SetPedCanRagdollFromPlayerImpact(ped, true)
+        SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
+    end
+end
+
+-- The last-damage bone can lag one frame behind the damage event.
+local function getLastDamageBone(ped)
+    local found, bone = GetPedLastDamageBone(ped)
+
+    if not found or not bone or bone == 0 then
+        for _ = 1, 5 do
+            Wait(0)
+
+            found, bone = GetPedLastDamageBone(ped)
+
+            if found and bone and bone ~= 0 then
+                break
+            end
+        end
+    end
+
+    return bone
+end
+
 AddEventHandler('gameEventTriggered', function(name, args)
     if name ~= 'CEventNetworkEntityDamage' then
         return
     end
 
-    -- The same event that just downed us must not finish us too... with one
-    -- exception: one bullet to the head finishes the player on the spot.
+    -- The same event that just downed us must not finish us too (except for
+    -- head shots - see below).
     local wasDowningEvent = downedByCurrentEvent
     downedByCurrentEvent = false
 
     local ped = PlayerPedId()
     local myId = GetPlayerServerId(PlayerId())
 
-    if not isDowned or finishedPlayers[myId] or isCarried or isBeingTreated then
+    if finishedPlayers[myId] or isCarried or isBeingTreated then
         return
     end
 
@@ -3184,13 +3259,35 @@ AddEventHandler('gameEventTriggered', function(name, args)
         return
     end
 
-    if wasDowningEvent then
-        local found, bone = GetPedLastDamageBone(ped)
+    -- ONE-SHOT: a bullet to the head finishes the player instantly, even at
+    -- full HP. Completely dead - no revive, no unconscious phase at all.
+    -- While already downed, ANY hit to the head (including melee) finishes.
+    -- Prefer the bone captured synchronously by the downing handler for THIS
+    -- event; fall back to a fresh read (with a short retry) if needed.
+    local bonePart = lastDamageBonePart
+    local weaponHash = lastDamageWeaponHash
+    lastDamageBonePart = nil
+    lastDamageWeaponHash = 0
 
-        if not (found and bone and BONE_TO_PART[bone] == 'head') then
-            return
-        end
+    if not bonePart then
+        local bone = getLastDamageBone(ped)
+        bonePart = bone and BONE_TO_PART[bone] or nil
     end
 
-    TriggerServerEvent('amb_server:finishPlayer')
+    local isBullet = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
+
+    if bonePart == 'head' and (isDowned or isBullet) then
+        if not isDowned then
+            forceDownedForFinish()
+        end
+
+        TriggerServerEvent('amb_server:finishPlayer')
+
+        return
+    end
+
+    -- Any other damage while downed (the 1% HP lost) finishes the player too.
+    if isDowned and not wasDowningEvent then
+        TriggerServerEvent('amb_server:finishPlayer')
+    end
 end)
