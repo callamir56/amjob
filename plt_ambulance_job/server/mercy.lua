@@ -122,10 +122,8 @@ RegisterNetEvent('amb_server:finishPlayer', function()
         minutes = math.floor(respawnSeconds() / 60)
     }), 'error')
 
-    if Config.Debug then
-        print('^2[Mercy]^7 Player ' .. tostring(src) .. ' was finished. Hospital respawn in '
-            .. respawnSeconds() .. 's.')
-    end
+    print(('^2[Mercy]^7 Player %s was FINISHED. Hospital respawn in %ss.'):format(
+        tostring(src), respawnSeconds()))
 
     SetTimeout(respawnSeconds() * 1000, function()
         hospitalRespawn(src)
