@@ -1,6 +1,13 @@
 RegisterNetEvent('amb_server:bleedOut', function()
     local src = source
 
+    -- The rebuilt death system manages the downed phase itself; there is no
+    -- framework bleed-out while it is active.
+    if not (Config.DisableDeathSystem == true
+        or (Config.DeathSystem and Config.DeathSystem.Enabled == false)) then
+        return
+    end
+
     if Framework.HasAuthoritativeMedicalState() then
         local state, deadSince = Framework.GetMedicalState(src)
 

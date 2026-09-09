@@ -305,7 +305,13 @@ RegisterNetEvent('amb_server:searchDowned', function(targetId)
         return
     end
 
-    if exports.plt_ambulance_job:IsPlayerFinished(targetId) then
+    local targetFinished = false
+
+    pcall(function()
+        targetFinished = exports.plt_ambulance_job:IsPlayerFinished(targetId) == true
+    end)
+
+    if targetFinished then
         Framework.Notify(src, _L('player_finished_other'), 'error')
 
         return
@@ -626,7 +632,13 @@ local function internalRevive(src)
     end
 
     -- A finished player cannot be revived; hospital respawn handles them.
-    if exports.plt_ambulance_job:IsPlayerFinished(src) then
+    local finished = false
+
+    pcall(function()
+        finished = exports.plt_ambulance_job:IsPlayerFinished(src) == true
+    end)
+
+    if finished then
         return false
     end
 

@@ -194,8 +194,9 @@ Config.ClothingRemoval = {
 }
 
 Config.Deathscreen = {
-    -- Built-in death screen stays off while the death system is removed.
-    UseBuiltIn = false
+    -- Built-in death screen (same UI as before: ECG monitor, status headline
+    -- and the timer).
+    UseBuiltIn = true
 }
 
 Config.LocalDoctor = {
@@ -247,20 +248,53 @@ Config.Carry = {
 
 --[[
     ------------------------------------------------------------------
-    DEATH SYSTEM: REMOVED / DISABLED
+    DEATH SYSTEM (rebuilt from scratch - client/death.lua + server/death.lua)
     ------------------------------------------------------------------
-    Set this to true while the resource must NOT touch death at all.
+    The new system does NOT rely on FiveM damage events at all. It watches
+    the player's health every frame - the same way the GTA engine itself
+    detects death - so it works on every server.
 
-    With it enabled:
-      * no downed / unconscious state (nothing is pinned or forced);
-      * no death screen, no EMS auto call, no hospital transport;
-      * no finish / mercy logic, no 10 minute timer, no inventory wipe;
-      * medics cannot revive or body-bag (no player is ever downed);
-      * death behaves exactly like vanilla GTA / your framework default.
+    Rules:
+      * One bullet to the head = FINISHED instantly, from any state (even
+        full HP). No unconscious phase, no revive - completely dead.
+      * The first fatal body hit = DOWNED (unconscious) with 1% HP pinned.
+      * ANY further damage while downed (bullet, kick, run over by a car,
+        explosion, anything) = FINISHED for good.
+      * Finished: the body lies lifeless with NO animation, every control
+        is locked, no EMS request, no hospital transport, no revive
+        (medics can only body-bag), a 10 minute timer runs and then the
+        player respawns in front of the hospital with their ENTIRE
+        ox_inventory wiped.
 
-    Set it back to false only once the new death system is implemented.
+    Set Config.DisableDeathSystem = true to switch the resource back to
+    "do not touch death at all" mode.
 ]]
-Config.DisableDeathSystem = true
+Config.DisableDeathSystem = false
+
+Config.DeathSystem = {
+    Enabled = true,
+    -- Health a downed player is pinned at (must stay above 100).
+    DownedHealth = 110,
+    -- Below this health the player is downed.
+    DownedThreshold = 125,
+    -- A head hit while alive must deal at least this much damage to finish.
+    MinAliveHeadshotDamage = 40,
+    -- Seconds until a finished player respawns at the hospital (10 minutes).
+    RespawnSeconds = 600,
+    -- Ignore all damage for this long after the resource starts (ms).
+    SpawnGraceMs = 10000,
+}
+
+-- Mercy (finished) extras: inventory behaviour + hospital spawn on respawn.
+Config.Mercy = {
+    Enabled = true,
+    -- Fallback hospital spawn when no check-in bed is configured.
+    HospitalCoords = { x = 307.7, y = -590.8, z = 43.3, h = 0.0 },
+    -- Wipe the player's entire ox_inventory when the mercy timer ends.
+    ClearInventory = true,
+    -- Legacy behaviour: drop the inventory at the body instead of wiping it.
+    DropInventory = false,
+}
 
 Config.ShowFakePlayers = true
 Config.FakePlayers = {

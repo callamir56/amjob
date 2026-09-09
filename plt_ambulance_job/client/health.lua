@@ -51,6 +51,13 @@ local walkingAidItem = nil
 local crutchProp = nil
 local spawnManagerDisabled = false
 
+-- True while the rebuilt death system (client/death.lua) owns the downed and
+-- finished states. The legacy health.lua handling only keeps bookkeeping then.
+local function deathSystemOwnsState()
+    return Config.DisableDeathSystem ~= true
+        and not (Config.DeathSystem and Config.DeathSystem.Enabled == false)
+end
+
 local function pushMedicalState(state)
     if Config.DisableDeathSystem == true then
         return
@@ -1258,6 +1265,12 @@ local function shouldEnforceDownedState()
         return false
     end
 
+    -- The rebuilt death system (client/death.lua) owns the downed and
+    -- finished poses; the legacy enforcement must not fight it.
+    if deathSystemOwnsState() then
+        return false
+    end
+
     if isInLastStand or isKnockoutActive() then
         return false
     end
@@ -1552,6 +1565,10 @@ CreateThread(function()
         else
             sleep = useBuiltInDeathscreen and 40 or 0
 
+            -- The rebuilt death system (client/death.lua) owns the downed and
+            -- finished poses; this legacy enforcement loop stays dormant.
+            if not deathSystemOwnsState() then
+
             if crutchProp then
                 removeCrutchProp()
             end
@@ -1611,6 +1628,8 @@ CreateThread(function()
                     end
                 end
             end
+
+            end -- deathSystemOwnsState wrapper
         end
 
         Wait(sleep)
@@ -1697,6 +1716,48 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
     -- The death system is removed: this resource does not react to damage at
     -- all (no injuries, no downed state, no death handling).
     if Config.DisableDeathSystem == true then
+        return
+    end
+
+    if deathSystemOwnsState() then
+        -- The rebuilt death system (client/death.lua) owns the downed and
+        -- finished states; only the injury tracking stays here.
+        local part = getDamagedPart(victim)
+
+        if part then
+            injuries[part].level = math.min(Config.Health.MaxInjuryLevel or 5, injuries[part].level + 1)
+
+            local isFall, isVehicle = getDamageContext(victim, weaponHash, attacker)
+
+            if isFall or isVehicle then
+                if isFall then
+                    local legPart = math.random(1, 2) == 1 and 'left_leg' or 'right_leg'
+
+                    if not tryFracture(legPart, 'fall') then
+                        tryFracture(part, 'fall_fallback')
+                    end
+                else
+                    tryFracture(part, 'vehicle')
+                end
+            end
+
+            local isBulletWound = BULLET_WEAPON_GROUPS[GetWeapontypeGroup(weaponHash)] == true
+
+            if isBulletWound then
+                injuries[part].bullet = true
+            end
+
+            local bleedChance = isBulletWound
+                and (Config.Health.BulletBleedChance or 90)
+                or (Config.Health.BleedChance or 40)
+
+            if bleedChance > math.random(1, 100) then
+                injuries.bleeding = injuries.bleeding + 1
+            end
+
+            syncInjuries()
+        end
+
         return
     end
 
@@ -1802,6 +1863,9 @@ CreateThread(function()
 
         if Config.DisableDeathSystem == true then
             -- The death system is removed: nothing to detect here.
+        elseif deathSystemOwnsState() then
+            -- The rebuilt death system (client/death.lua) handles all death
+            -- detection; this legacy fallback detector stays dormant.
         elseif not isDowned and not isKnockoutActive() and not areActionsBlocked() then
             local ped = PlayerPedId()
 
@@ -2176,6 +2240,21 @@ local function setDeathStatus(downed, skipStatePush)
     end
 
     if Config.DisableDeathSystem == true then
+        return
+    end
+
+    if deathSystemOwnsState() then
+        -- The rebuilt death system (client/death.lua) owns the pose and the
+        -- health; here only the bookkeeping is kept in sync (this runs before
+        -- the legacy framework guards so it also works on QBCore).
+        isDowned = true
+
+        applyDeadRestrictions(true)
+
+        if not skipStatePush then
+            pushMedicalState(Framework.MedicalState.LASTSTAND)
+        end
+
         return
     end
 
