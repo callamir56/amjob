@@ -285,6 +285,12 @@ local function applyCrawlPose(ped)
         local flag = (downedPoseState == 'fwd' or downedPoseState == 'bwd')
             and CRAWL_FLAG_MOVE or CRAWL_FLAG_STILL
 
+        -- Decisive correction: the task is really gone (or the ped stood
+        -- up). Clear whatever is holding the ped upright, then drop it back
+        -- into the pose. Only THIS branch ever clears tasks - it is a
+        -- conditional correction, never a blind per-frame clear.
+        ClearPedTasksImmediately(ped)
+
         TaskPlayAnimAdvanced(ped, CRAWL_DICT, currentAnim, GetEntityCoords(ped), 1.0, 0.0,
             GetEntityHeading(ped), 1.0, 1.0, 1.0, flag, 1.0, 0, 0)
     end
@@ -438,9 +444,11 @@ local function enterDowned(reason)
     SetEntityHealth(ped, downedHealth())
     lastHealth = downedHealth()
 
-    -- NO invincibility: damage must keep registering so the health watch can
-    -- detect the finishing hit (1 HP -> 0).
-    SetEntityInvincible(ped, false)
+    -- DOWNED peds are invincible: bullets, falls and explosions must NOT
+    -- churn the death state (the engine would keep killing / resurrecting
+    -- the ped). Only EXECUTE, the server-validated timer and GIVE UP can
+    -- finish a downed player. Reset to false on revive / respawn.
+    SetEntityInvincible(ped, true)
     SetEntityProofs(ped, false, false, false, false, false, false, false, false)
 
     DisablePlayerFiring(PlayerId(), true)
@@ -490,7 +498,9 @@ local function enterFinished(reason)
     SetEntityHealth(ped, downedHealth())
     lastHealth = downedHealth()
 
-    SetEntityInvincible(ped, false)
+    -- FINISHED bodies stay invincible too: stray bullets cannot churn the
+    -- corpse (the loop below never has to resurrect it again).
+    SetEntityInvincible(ped, true)
     SetEntityProofs(ped, false, false, false, false, false, false, false, false)
 
     DisablePlayerFiring(PlayerId(), true)
@@ -600,32 +610,39 @@ CreateThread(function()
             -- DOWNED = crawl only. Everything that could stand the ped up or
             -- let it fight is blocked; WASD stays free for the crawl. The
             -- ped itself is NEVER frozen here (freeze belongs to FINISHED).
+            --
+            -- IMPORTANT: damage does NOT finish a downed player. The state
+            -- machine only moves DOWNED -> FINISHED through EXECUTE, the
+            -- server-validated timer or GIVE UP. Bullets just keep him down.
             enforceDownedControls()
 
             if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
-                -- The 1 HP dropped to 0: killed while downed = finished.
-                enterFinished('killed while downed')
+                -- Safety net (engine death residue): bring the ped right back
+                -- and keep it DOWNED on the ground - no FINISHED transition.
+                ped = resurrectLocalPlayer(ped)
+
+                SetEntityMaxHealth(ped, 200)
+                SetEntityHealth(ped, downedHealth())
+                SetEntityInvincible(ped, true)
+                SetEntityProofs(ped, false, false, false, false, false, false, false, false)
+                lastHealth = downedHealth()
+
+                applyCrawlPose(ped)
+            elseif isCarried or isTreated then
+                lastHealth = GetEntityHealth(ped)
             else
                 local health = GetEntityHealth(ped)
 
-                if isCarried or isTreated then
-                    lastHealth = health
-                elseif health < lastHealth then
-                    -- Any further damage (bullet, kick, vehicle, anything).
-                    enterFinished('damage while downed')
-                    lastHealth = GetEntityHealth(PlayerPedId())
-                else
-                    -- Keep the 1 HP pinned while crawling.
-                    if health > downedHealth() then
-                        SetEntityHealth(ped, downedHealth())
-                    end
-
-                    lastHealth = downedHealth()
-
-                    -- Crawl state controller: keeps the ped on the ground in
-                    -- the wounded pose, never restarts the anim while playing.
-                    applyCrawlPose(ped)
+                -- Keep the 1 HP pinned while crawling.
+                if health > downedHealth() then
+                    SetEntityHealth(ped, downedHealth())
                 end
+
+                lastHealth = downedHealth()
+
+                -- Crawl state controller: keeps the ped on the ground in
+                -- the wounded pose, never restarts the anim while playing.
+                applyCrawlPose(ped)
             end
         elseif state == State.FINISHED then
             -- FINAL DEAD = fully immobile: resurrect behind the scenes if the
@@ -699,7 +716,8 @@ RegisterNetEvent('amb_client:finishRefused', function()
     print(('^3[DEATH]^7 finish refused by server (attempt %s), retrying...'):format(tostring(finishRetries)))
 
     if finishRetries >= 5 then
-        -- Give up: stay downed, the player can still be finished by damage.
+        -- Give up: stay downed. Only EXECUTE, the timer or GIVE UP can still
+        -- finish the player - damage never does.
         print('^1[DEATH]^7 finish retry limit reached, staying downed.')
 
         local ped = PlayerPedId()
@@ -790,6 +808,15 @@ end)
 
 RegisterNetEvent('amb_client:stopCPRAnimation', function()
     isTreated = false
+
+    -- The legacy health handler re-applies its own downed pose on this event;
+    -- clear it and make sure the crawl is back on top right away.
+    local ped = PlayerPedId()
+
+    if ped and ped ~= 0 and DoesEntityExist(ped) and state == State.DOWNED then
+        ClearPedTasksImmediately(ped)
+        applyCrawlPose(ped)
+    end
 end)
 
 AddEventHandler('amb_client:onPlayerRevive', function()
@@ -807,7 +834,9 @@ AddEventHandler('amb_client:onPlayerRevive', function()
     if ped and ped ~= 0 and DoesEntityExist(ped) then
         stopCrawlPose(ped)
 
-        -- Revived = everything released: no crawl, no freeze, normal movement.
+        -- Revived = everything released: no crawl, no freeze, no invincibility,
+        -- normal movement.
+        SetEntityInvincible(ped, false)
         FreezeEntityPosition(ped, false)
         lastHealth = GetEntityHealth(ped)
 
@@ -835,6 +864,7 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
         -- the hospital respawn can stand the player up.
         stopCrawlPose(ped)
         ClearPedTasksImmediately(ped)
+        SetEntityInvincible(ped, false)
         FreezeEntityPosition(ped, false)
         SetPedCanRagdoll(ped, true)
         SetPedCanPlayAmbientAnims(ped, true)
@@ -862,6 +892,7 @@ RegisterNetEvent('amb_client:deathSystemReset', function()
     if ped and ped ~= 0 and DoesEntityExist(ped) then
         stopCrawlPose(ped)
         ClearPedTasksImmediately(ped)
+        SetEntityInvincible(ped, false)
         FreezeEntityPosition(ped, false)
         SetPedCanRagdoll(ped, true)
         SetPedCanPlayAmbientAnims(ped, true)
