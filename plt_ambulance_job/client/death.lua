@@ -42,11 +42,20 @@ local finishRetries = 0
 local isCarried = false
 local isTreated = false
 local isBeingExecuted = false
+local downedPoseState = nil -- nil | 'still' | 'fwd' | 'bwd' (crawl pose)
 
 local lastAttackerEntity = 0
 local lastDamageWeapon = 0
 
-local CRAWL_CLIPSET = 'move_m@injured'
+-- The wounded crawl: 'move_crawl' keeps the ped flat on its front. The
+-- moving variant (flag 47) moves the ped through the world while the
+-- animation plays; the still variant (flag 46) loops in place. WASD input
+-- drives it, so the ped CRAWLS on the ground instead of standing up.
+local CRAWL_DICT = 'move_crawl'
+local CRAWL_ANIM_FWD = 'onfront_fwd'
+local CRAWL_ANIM_BWD = 'onfront_bwd'
+local CRAWL_FLAG_STILL = 46
+local CRAWL_FLAG_MOVE = 47
 
 -- Common weapon hashes -> display labels (UI shows UNKNOWN for the rest).
 local WEAPON_LABELS = {
@@ -198,31 +207,110 @@ local function leaveVehicle(ped)
     end
 end
 
--- Crawling pose: the wounded clipset + stealth movement = the crawl the
--- player uses while downed.
+-- DOWNED pose / crawl state controller.
+--
+-- RULES (this is a state controller, NOT a per-frame animation trigger):
+--  * The ped is NEVER frozen while downed - FreezeEntityPosition belongs to
+--    FINISHED only (a short freeze while being executed is allowed).
+--  * WASD = crawl: W/S move forward/backward on the ground, A/D turn.
+--    Standing, walking, running, jumping, weapons and vehicles stay blocked
+--    (see enforceDownedControls below).
+--  * The animation is re-applied ONLY when the task was really lost (engine
+--    interruption, ragdoll ended, or the ped somehow stood up) - it is never
+--    restarted frame after frame while it is playing.
 local function applyCrawlPose(ped)
-    if not crawlEnabled() or IsPedInAnyVehicle(ped, false) then
+    if not crawlEnabled() or IsPedInAnyVehicle(ped, false) or isCarried or isBeingExecuted then
         return
     end
 
-    if not HasAnimSetLoaded(CRAWL_CLIPSET) then
-        RequestAnimSet(CRAWL_CLIPSET)
+    -- DOWNED is never frozen: crawl must stay possible.
+    FreezeEntityPosition(ped, false)
+
+    if IsPedRagdoll(ped) then
+        -- Let the ragdoll settle; the pose is re-applied once it ends.
+        return
+    end
+
+    if not HasAnimDictLoaded(CRAWL_DICT) then
+        RequestAnimDict(CRAWL_DICT)
 
         local waited = 0
 
-        while not HasAnimSetLoaded(CRAWL_CLIPSET) and waited < 1000 do
+        while not HasAnimDictLoaded(CRAWL_DICT) and waited < 1000 do
             Wait(50)
             waited = waited + 50
         end
     end
 
-    SetPedMovementClipset(ped, CRAWL_CLIPSET, 1.0)
-    SetPedStealthMovement(ped, true, '')
+    local coords = GetEntityCoords(ped)
+    local heading = GetEntityHeading(ped)
+
+    local moveAxis = GetControlNormal(0, 31)
+    local wantFwd = IsControlPressed(0, 32) or moveAxis > 0.5
+    local wantBwd = IsControlPressed(0, 33) or moveAxis < -0.5
+
+    -- Apply the animation on input transitions only.
+    if downedPoseState ~= 'fwd' and wantFwd and not wantBwd then
+        TaskPlayAnimAdvanced(ped, CRAWL_DICT, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
+            1.0, 1.0, 1.0, CRAWL_FLAG_MOVE, 1.0, 0, 0)
+        downedPoseState = 'fwd'
+    elseif downedPoseState ~= 'bwd' and wantBwd and not wantFwd then
+        TaskPlayAnimAdvanced(ped, CRAWL_DICT, CRAWL_ANIM_BWD, coords, 1.0, 0.0, heading,
+            1.0, 1.0, 1.0, CRAWL_FLAG_MOVE, 1.0, 0, 0)
+        downedPoseState = 'bwd'
+    elseif downedPoseState ~= 'still' and not wantFwd and not wantBwd then
+        TaskPlayAnimAdvanced(ped, CRAWL_DICT, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
+            1.0, 1.0, 1.0, CRAWL_FLAG_STILL, 1.0, 0, 0)
+        downedPoseState = 'still'
+    end
+
+    -- Turn with A/D while crawling.
+    if downedPoseState == 'fwd' or downedPoseState == 'bwd' then
+        if IsControlPressed(0, 34) then
+            SetEntityHeading(ped, heading + 2.0)
+        elseif IsControlPressed(0, 35) then
+            SetEntityHeading(ped, heading - 2.0)
+        end
+    end
+
+    -- Guard: only re-apply when the task is really gone (engine cleared it,
+    -- ragdoll ended, or the ped stood up). Never restarts while the ped is
+    -- actually playing or crawling.
+    local currentAnim = (downedPoseState == 'bwd') and CRAWL_ANIM_BWD or CRAWL_ANIM_FWD
+    local playing = IsEntityPlayingAnim(ped, CRAWL_DICT, currentAnim, 3)
+    local stoodUp = GetEntityHeightAboveGround(ped) > 0.6
+    local moving = GetEntitySpeed(ped) > 0.3
+
+    if stoodUp or (not playing and (downedPoseState == 'still' or not moving)) then
+        local flag = (downedPoseState == 'fwd' or downedPoseState == 'bwd')
+            and CRAWL_FLAG_MOVE or CRAWL_FLAG_STILL
+
+        TaskPlayAnimAdvanced(ped, CRAWL_DICT, currentAnim, GetEntityCoords(ped), 1.0, 0.0,
+            GetEntityHeading(ped), 1.0, 1.0, 1.0, flag, 1.0, 0, 0)
+    end
 end
 
+-- Fully releases the crawl state: animation stopped, freeze lifted. Safe to
+-- call from revive / carry / CPR / execution / reset paths.
 local function stopCrawlPose(ped)
-    SetPedStealthMovement(ped, false, '')
-    ResetPedMovementClipset(ped, 0)
+    downedPoseState = nil
+
+    if IsEntityPlayingAnim(ped, CRAWL_DICT, CRAWL_ANIM_FWD, 3) then
+        StopAnimTask(ped, CRAWL_DICT, CRAWL_ANIM_FWD, 1.0)
+    end
+
+    if IsEntityPlayingAnim(ped, CRAWL_DICT, CRAWL_ANIM_BWD, 3) then
+        StopAnimTask(ped, CRAWL_DICT, CRAWL_ANIM_BWD, 1.0)
+    end
+
+    FreezeEntityPosition(ped, false)
+end
+
+-- Ends any lingering lifeless state (infinite ragdoll from dropLifeless) and
+-- returns the body to a controllable state so the crawl can take over again.
+local function releaseFromRagdoll(ped)
+    FreezeEntityPosition(ped, false)
+    ClearPedTasksImmediately(ped)
 end
 
 -- Lifeless body: tasks cleared, ragdoll on the ground, NO animation at all.
@@ -357,6 +445,17 @@ local function enterDowned(reason)
 
     DisablePlayerFiring(PlayerId(), true)
 
+    -- Downed means no weapons at all: holster whatever is drawn.
+    pcall(function()
+        if GetSelectedPedWeapon(ped) ~= GetHashKey('WEAPON_UNARMED') then
+            SetCurrentPedWeapon(ped, GetHashKey('WEAPON_UNARMED'), true)
+        end
+    end)
+
+    -- DOWNED is NEVER frozen: crawl stays possible. (Full freeze belongs to
+    -- FINISHED, and a short freeze is allowed only while being executed.)
+    FreezeEntityPosition(ped, false)
+
     if crawlEnabled() then
         applyCrawlPose(ped)
     else
@@ -396,9 +495,12 @@ local function enterFinished(reason)
 
     DisablePlayerFiring(PlayerId(), true)
 
-    -- Lifeless, NO animation at all.
+    -- FINAL DEAD = FULLY IMMOBILE: no animation, ragdoll on the ground and
+    -- the entity frozen. Freeze is allowed ONLY here (and briefly while
+    -- being executed), never while merely downed.
     stopCrawlPose(ped)
     dropLifeless(ped)
+    FreezeEntityPosition(ped, true)
 
     markDowned()
 
@@ -423,6 +525,36 @@ AddEventHandler('gameEventTriggered', function(name, args)
         end
     end
 end)
+
+-- Control blocking for the DOWNED state. Crawl input (WASD + look) stays
+-- free; everything that could stand the ped up or let it fight is blocked.
+-- DisableControlAction is per-frame only, so this runs every frame while
+-- downed - nothing here is sticky and nothing here freezes the ped.
+local function enforceDownedControls()
+    DisableControlAction(0, 21, true)  -- sprint
+    DisableControlAction(0, 22, true)  -- jump
+    DisableControlAction(0, 23, true)  -- enter vehicle
+    DisableControlAction(0, 24, true)  -- attack / shoot / melee
+    DisableControlAction(0, 25, true)  -- aim
+    DisableControlAction(0, 36, true)  -- duck / stealth
+    DisableControlAction(0, 37, true)  -- weapon wheel / select
+    DisableControlAction(0, 44, true)  -- cover
+    DisableControlAction(0, 45, true)  -- reload
+    DisableControlAction(0, 71, true)  -- vehicle accelerate
+    DisableControlAction(0, 72, true)  -- vehicle brake
+    DisableControlAction(0, 73, true)  -- vehicle duck
+    DisableControlAction(0, 74, true)  -- vehicle attack
+    DisableControlAction(0, 75, true)  -- vehicle exit / attack 2
+    DisableControlAction(0, 140, true) -- melee attack light
+    DisableControlAction(0, 141, true) -- melee attack heavy
+    DisableControlAction(0, 142, true) -- melee attack alternate
+    DisableControlAction(0, 143, true) -- block
+    DisableControlAction(0, 257, true) -- attack 2
+    DisableControlAction(0, 263, true) -- melee attack 1
+    DisableControlAction(0, 264, true) -- melee attack 2
+
+    DisablePlayerFiring(PlayerId(), true)
+end
 
 -- ---------------------------------------------------------------
 -- ONE loop: health watch + crawl/finished enforcement
@@ -465,6 +597,11 @@ CreateThread(function()
                 lastHealth = health
             end
         elseif state == State.DOWNED then
+            -- DOWNED = crawl only. Everything that could stand the ped up or
+            -- let it fight is blocked; WASD stays free for the crawl. The
+            -- ped itself is NEVER frozen here (freeze belongs to FINISHED).
+            enforceDownedControls()
+
             if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
                 -- The 1 HP dropped to 0: killed while downed = finished.
                 enterFinished('killed while downed')
@@ -485,17 +622,20 @@ CreateThread(function()
 
                     lastHealth = downedHealth()
 
-                    if crawlEnabled() and not isCarried and not isBeingExecuted then
-                        applyCrawlPose(ped)
-                    end
+                    -- Crawl state controller: keeps the ped on the ground in
+                    -- the wounded pose, never restarts the anim while playing.
+                    applyCrawlPose(ped)
                 end
             end
         elseif state == State.FINISHED then
-            -- Completely dead: resurrect behind the scenes if the engine
-            -- killed the ped, pin the 1% health, lock every control, keep the
-            -- body ragdolled on the ground with no animation.
+            -- FINAL DEAD = fully immobile: resurrect behind the scenes if the
+            -- engine killed the ped, pin the 1% health, lock every control,
+            -- keep the body ragdolled on the ground and FROZEN.
             if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
                 ped = resurrectLocalPlayer(ped)
+
+                -- A resurrected ped stands up: put the body back on the ground.
+                dropLifeless(ped)
             end
 
             local health = GetEntityHealth(ped)
@@ -512,9 +652,13 @@ CreateThread(function()
             SetPedCanPlayAmbientBaseAnims(ped, false)
             SetBlockingOfNonTemporaryEvents(ped, true)
 
+            -- FINAL DEAD = FULLY IMMOBILE: the ONLY state allowed to freeze.
+            FreezeEntityPosition(ped, true)
+
             if not IsPedInAnyVehicle(ped, false) and not IsPedRagdoll(ped) then
                 if IsPedGettingUp(ped) or IsPedWalking(ped) or IsPedRunning(ped)
-                    or GetEntitySpeed(ped) > 0.5 then
+                    or IsPedJumping(ped) or GetEntitySpeed(ped) > 0.5
+                    or GetEntityHeightAboveGround(ped) > 0.5 then
                     SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
                 end
             end
@@ -560,6 +704,10 @@ RegisterNetEvent('amb_client:finishRefused', function()
 
         local ped = PlayerPedId()
 
+        if ped and ped ~= 0 and DoesEntityExist(ped) then
+            releaseFromRagdoll(ped)
+        end
+
         if crawlEnabled() then
             applyCrawlPose(ped)
         end
@@ -583,6 +731,10 @@ RegisterNetEvent('amb_client:executionStarted', function(executorSrc, executorNa
     if ped and ped ~= 0 and DoesEntityExist(ped) then
         stopCrawlPose(ped)
         dropLifeless(ped)
+
+        -- During the execution the body may be frozen so the executor's
+        -- animation lines up cleanly.
+        FreezeEntityPosition(ped, true)
     end
 
     Framework.Notify(_L('being_executed', {
@@ -598,19 +750,42 @@ RegisterNetEvent('amb_client:executionStopped', function()
         return
     end
 
+    -- Cancelled execution: back to the DOWNED state exactly as before -
+    -- crawl enabled, standing disabled, NO freeze, NO stuck ragdoll.
     local ped = PlayerPedId()
 
-    if ped and ped ~= 0 and DoesEntityExist(ped) and crawlEnabled() then
-        applyCrawlPose(ped)
+    if ped and ped ~= 0 and DoesEntityExist(ped) then
+        releaseFromRagdoll(ped)
+
+        if crawlEnabled() then
+            applyCrawlPose(ped)
+        end
     end
 end)
 
 RegisterNetEvent('amb_client:setCarried', function(carried)
     isCarried = carried == true
+
+    -- The crawl pose must not fight the carry; the loop re-applies it once
+    -- the player is put down again.
+    if isCarried then
+        local ped = PlayerPedId()
+
+        if ped and ped ~= 0 and DoesEntityExist(ped) then
+            stopCrawlPose(ped)
+        end
+    end
 end)
 
 RegisterNetEvent('amb_client:syncCPRAnimation', function()
     isTreated = true
+
+    -- Stop the crawl while CPR is running; it comes back once it ends.
+    local ped = PlayerPedId()
+
+    if ped and ped ~= 0 and DoesEntityExist(ped) then
+        stopCrawlPose(ped)
+    end
 end)
 
 RegisterNetEvent('amb_client:stopCPRAnimation', function()
@@ -632,6 +807,8 @@ AddEventHandler('amb_client:onPlayerRevive', function()
     if ped and ped ~= 0 and DoesEntityExist(ped) then
         stopCrawlPose(ped)
 
+        -- Revived = everything released: no crawl, no freeze, normal movement.
+        FreezeEntityPosition(ped, false)
         lastHealth = GetEntityHealth(ped)
 
         SetPedCanPlayAmbientAnims(ped, true)
@@ -654,7 +831,15 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
     local ped = PlayerPedId()
 
     if ped and ped ~= 0 and DoesEntityExist(ped) then
+        -- The body was frozen and ragdolled while FINISHED: release it all so
+        -- the hospital respawn can stand the player up.
         stopCrawlPose(ped)
+        ClearPedTasksImmediately(ped)
+        FreezeEntityPosition(ped, false)
+        SetPedCanRagdoll(ped, true)
+        SetPedCanPlayAmbientAnims(ped, true)
+        SetPedCanPlayAmbientBaseAnims(ped, true)
+        SetBlockingOfNonTemporaryEvents(ped, false)
         lastHealth = GetEntityHealth(ped)
     end
 

@@ -344,6 +344,7 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
         local callEMSTimer = Config.Health.CallEMSTimer or 60
         local callKeyHeld = false
         local transportKeyHeld = false
+        local giveUpKeyHeld = false
 
         while deathScreenActive do
             Wait(0)
@@ -400,6 +401,29 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
                 end
             elseif not transportPressed then
                 transportKeyHeld = false
+            end
+
+            -- GIVE UP on [H] (74): same gates as the NUI button. The NUI
+            -- button only works while the cursor is active, so the key is
+            -- the reliable way to trigger it. The server re-validates the
+            -- elapsed time before accepting the give-up.
+            local giveUpPressed = IsDisabledControlPressed(0, 74)
+
+            if giveUpPressed and not giveUpKeyHeld then
+                giveUpKeyHeld = true
+
+                if not mercyFinished and deathSystemActive() then
+                    local elapsed = (GetGameTimer() - deathStartTime) / 1000
+                    local needed = giveUpSeconds()
+
+                    if elapsed >= needed then
+                        TriggerServerEvent('amb_server:giveUp')
+                    else
+                        Framework.Notify(_L('give_up_unavailable'), 'error')
+                    end
+                end
+            elseif not giveUpPressed then
+                giveUpKeyHeld = false
             end
         end
     end)
