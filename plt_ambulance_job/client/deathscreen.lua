@@ -12,6 +12,52 @@ local nextVehicleLockTime = 0
 local DISABLED_CONTROLS = { 73, 177, 322, 30, 31, 32, 33, 34, 35, 21, 22, 24, 25 }
 local ENABLED_CONTROLS = { 1, 2, 245, 246, 47, 199, 200 }
 
+-- True while the rebuilt death system (client/death.lua) is active.
+local function deathSystemActive()
+    return Config.DisableDeathSystem ~= true
+        and not (Config.DeathSystem and Config.DeathSystem.Enabled == false)
+end
+
+local function deathTimerSeconds()
+    return math.max(1, tonumber((Config.DeathSystem and Config.DeathSystem.DeathTimer)
+        or (Config.Health and Config.Health.DeathTimer)) or 600)
+end
+
+local function giveUpSeconds()
+    return math.max(0, tonumber(Config.DeathSystem and Config.DeathSystem.GiveUpTime) or 60)
+end
+
+local function weaponLabelOf(hash)
+    local label = nil
+
+    pcall(function()
+        label = exports.plt_ambulance_job:GetWeaponLabel(hash)
+    end)
+
+    return label or _L('ui_weapon_unknown')
+end
+
+-- Normalises killer info (client captured or server validated) into a
+-- display-ready table: { src, name, weapon } - never nil / false in the UI.
+local function displayKillerInfo(info)
+    if type(info) ~= 'table' then
+        info = {}
+    end
+
+    local src = tonumber(info.src) or 0
+    local name = info.name
+
+    if not name or tostring(name) == '' then
+        name = 'UNKNOWN'
+    end
+
+    return {
+        src = src,
+        name = name,
+        weapon = weaponLabelOf(info.weaponHash)
+    }
+end
+
 local function isPlayerDowned()
     local downed = false
 
@@ -50,10 +96,34 @@ exports('IsDeathScreenActive', function()
     return deathScreenActive == true
 end)
 
+-- Hospital transport is NOT part of the current death-system phase: it is
+-- only available when Config.DeathSystem.AllowHospitalTransport = true.
+local function hospitalTransportAllowed()
+    if Config.DeathSystem then
+        return Config.DeathSystem.AllowHospitalTransport == true
+    end
+
+    return true
+end
+
 local function applyDeathControls()
     local ped = PlayerPedId()
 
     if not ped or ped == 0 or not DoesEntityExist(ped) then
+        return
+    end
+
+    -- Crawl phase (unconscious): the player CAN move (crawling on the
+    -- ground) and look around, but cannot fight. [G] (47) stays disabled so
+    -- the call-EMS detection below keeps working; [Y] (246) stays disabled
+    -- because hospital transport is not part of this phase.
+    if deathMode == 'unconscious' and not mercyFinished then
+        DisableAllControlActions(0)
+
+        for _, control in ipairs({ 1, 2, 30, 31, 32, 33, 34, 35, 36 }) do
+            EnableControlAction(0, control, true)
+        end
+
         return
     end
 
@@ -104,6 +174,11 @@ local function toggleDeathScreen(show, time, mode)
         time = time or 0,
         mode = mode or deathMode,
         transportDelay = transportDelay
+    })
+
+    SendNUIMessage({
+        action = 'amb_transportAllowed',
+        show = hospitalTransportAllowed()
     })
 
     SetNuiFocus(false, false)
@@ -168,7 +243,7 @@ local function callEMS()
     SendNUIMessage({ action = 'amb_emsCalled' })
 end
 
-RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medicalState)
+RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medicalState, killerInfo)
     if not useBuiltInDeathscreen or deathScreenActive then
         return
     end
@@ -180,6 +255,11 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
     deathMode = medicalState == Framework.MedicalState.LASTSTAND and 'unconscious' or 'dead'
     emsCalled = false
 
+    SendNUIMessage({
+        action = 'amb_killerInfo',
+        info = displayKillerInfo(killerInfo)
+    })
+
     local elapsed = math.max(0, tonumber(elapsedSeconds) or 0)
 
     bleedOutSent = medicalState == Framework.MedicalState.DEAD
@@ -189,37 +269,73 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
 
     toggleDeathScreen(true, deathTimer, deathMode)
 
+    -- Accurate countdown: the remaining time is recomputed from a fixed
+    -- endTime every tick (GetGameTimer is engine time, so lag / freezes
+    -- cannot drift it), and the start point is the server-authoritative
+    -- downed time.
     CreateThread(function()
+        local durationSeconds = deathSystemActive()
+            and deathTimerSeconds()
+            or (tonumber(Config.Health.DeathTimer) or 300)
+
+        local endTime = GetGameTimer() + durationSeconds * 1000
+
+        -- Ask the server how long we have been downed already.
+        if deathSystemActive() then
+            Framework.TriggerCallback('amb_server:getDeathElapsed', function(serverElapsed)
+                if not deathScreenActive then
+                    return
+                end
+
+                local elapsed = math.max(0, tonumber(serverElapsed) or 0)
+
+                endTime = GetGameTimer() + math.max(0, (durationSeconds - elapsed)) * 1000
+            end)
+        end
+
+        local lastSent = -1
+
         while deathScreenActive do
-            Wait(1000)
+            Wait(250)
 
-            if deathTimer > 0 then
-                deathTimer = deathTimer - 1
-
-                SendNUIMessage({
-                    action = 'amb_updateDeathTimer',
-                    time = deathTimer
-                })
+            if mercyFinished then
+                -- The finished mode manages its own display.
             else
-                if not bleedOutSent and not mercyFinished then
+                local remaining = math.ceil((endTime - GetGameTimer()) / 1000)
+
+                if remaining < 0 then
+                    remaining = 0
+                end
+
+                if remaining ~= lastSent then
+                    lastSent = remaining
+
+                    SendNUIMessage({
+                        action = 'amb_updateDeathTimer',
+                        time = remaining
+                    })
+                end
+
+                if remaining <= 0 and not bleedOutSent then
                     bleedOutSent = true
-                    TriggerServerEvent('amb_server:bleedOut')
 
-                    if deathMode ~= 'dead' then
-                        deathMode = 'dead'
+                    if deathSystemActive() then
+                        -- Bleed out: the server verifies the elapsed time.
+                        TriggerServerEvent('amb_server:finishPlayer', 'timer')
+                    else
+                        TriggerServerEvent('amb_server:bleedOut')
 
-                        toggleDeathScreen(true, 0, deathMode)
+                        if deathMode ~= 'dead' then
+                            deathMode = 'dead'
 
-                        if emsCalled then
-                            SendNUIMessage({ action = 'amb_emsCalled' })
+                            toggleDeathScreen(true, 0, deathMode)
+
+                            if emsCalled then
+                                SendNUIMessage({ action = 'amb_emsCalled' })
+                            end
                         end
                     end
                 end
-
-                SendNUIMessage({
-                    action = 'amb_updateDeathTimer',
-                    time = 0
-                })
             end
         end
     end)
@@ -265,7 +381,7 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
             if transportPressed and not transportKeyHeld then
                 transportKeyHeld = true
 
-                if not mercyFinished then
+                if not mercyFinished and hospitalTransportAllowed() then
                     local elapsed = (GetGameTimer() - deathStartTime) / 1000
 
                     if elapsed >= transportDelay then
@@ -347,7 +463,8 @@ RegisterNUICallback('amb_callEMS', function(_, cb)
 end)
 
 RegisterNUICallback('amb_goHospital', function(_, cb)
-    if not useBuiltInDeathscreen or not deathScreenActive or mercyFinished then
+    if not useBuiltInDeathscreen or not deathScreenActive or mercyFinished
+        or not hospitalTransportAllowed() then
         cb('ok')
         return
     end
@@ -380,6 +497,66 @@ RegisterNUICallback('amb_goHospital', function(_, cb)
     cb('ok')
 end)
 
+RegisterNUICallback('amb_giveUp', function(_, cb)
+    if not useBuiltInDeathscreen or not deathScreenActive or mercyFinished then
+        cb('ok')
+        return
+    end
+
+    if not deathSystemActive() then
+        cb('ok')
+        return
+    end
+
+    local elapsed = (GetGameTimer() - deathStartTime) / 1000
+    local needed = giveUpSeconds()
+
+    if elapsed < needed then
+        Framework.Notify(_L('give_up_unavailable'), 'error')
+
+        cb('ok')
+        return
+    end
+
+    -- The server re-checks the elapsed time again.
+    TriggerServerEvent('amb_server:giveUp')
+
+    cb('ok')
+end)
+
+-- Killer info resolved / validated by the server.
+RegisterNetEvent('amb_client:deathKillerInfo', function(info)
+    if not deathScreenActive then
+        return
+    end
+
+    SendNUIMessage({
+        action = 'amb_killerInfo',
+        info = displayKillerInfo(info)
+    })
+end)
+
+-- GIVE UP button state: locked until GiveUpTime has passed.
+CreateThread(function()
+    while true do
+        Wait(500)
+
+        if useBuiltInDeathscreen and deathScreenActive and not mercyFinished then
+            local elapsed = (GetGameTimer() - deathStartTime) / 1000
+            local needed = giveUpSeconds()
+            local remaining = math.ceil(math.max(0, needed - elapsed))
+
+            SendNUIMessage({
+                action = 'amb_giveUpState',
+                available = deathSystemActive() and remaining <= 0,
+                remaining = remaining
+            })
+        else
+            Wait(500)
+        end
+    end
+end)
+
 CreateThread(function()
     while true do
         Wait(1000)
@@ -390,7 +567,7 @@ CreateThread(function()
 
             SendNUIMessage({
                 action = 'amb_transportState',
-                available = remaining <= 0,
+                available = hospitalTransportAllowed() and remaining <= 0,
                 remaining = remaining
             })
         end
@@ -428,7 +605,8 @@ AddEventHandler('amb_client:finishedStateChanged', function(src, finished)
     end
 
     deathMode = 'dead'
-    deathTimer = math.max(60, tonumber(Config.Mercy and Config.Mercy.RespawnSeconds) or 600)
+    deathTimer = math.max(60, tonumber((Config.DeathSystem and Config.DeathSystem.RespawnSeconds)
+        or (Config.Mercy and Config.Mercy.RespawnSeconds)) or 600)
 
     toggleDeathScreen(true, deathTimer, 'dead')
 
@@ -437,11 +615,16 @@ AddEventHandler('amb_client:finishedStateChanged', function(src, finished)
         time = deathTimer
     })
 
-    -- Finished mode: no Call EMS / Go To Hospital, just the countdown until
-    -- the hospital respawn (the web UI hides the buttons when it sees this).
+    -- Finished mode: no Call EMS / Go To Hospital / Give Up.
     SendNUIMessage({
         action = 'amb_finishedState',
         show = true
+    })
+
+    SendNUIMessage({
+        action = 'amb_giveUpState',
+        available = false,
+        remaining = 0
     })
 end)
 

@@ -189,8 +189,99 @@ local function searchAction(ped)
     TriggerServerEvent('amb_server:searchDowned', id)
 end
 
+-- ---------------------------------------------------------------
+-- Execute (finish the downed player)
+-- ---------------------------------------------------------------
+local isExecuting = false
+
+local function executeEnabled()
+    return not (Config.DeathSystem and Config.DeathSystem.ExecuteEnabled == false)
+end
+
+local function executeDistance()
+    return tonumber(Config.DeathSystem and Config.DeathSystem.ExecuteDistance) or 2.0
+end
+
+local function executeTime()
+    return tonumber(Config.DeathSystem and Config.DeathSystem.ExecuteTime) or 5000
+end
+
+local function isSelfAlive()
+    local alive = true
+
+    pcall(function()
+        alive = exports.plt_ambulance_job:IsPlayerDowned() ~= true
+    end)
+
+    return alive and not exports.plt_ambulance_job:IsPlayerFinished(GetPlayerServerId(PlayerId()))
+end
+
+local function executeAction(ped)
+    if isExecuting then
+        return
+    end
+
+    local id = getPedServerId(ped)
+
+    if not (id > 0) then
+        return
+    end
+
+    local myCoords = GetEntityCoords(PlayerPedId())
+    local targetCoords = GetEntityCoords(ped)
+
+    if #(myCoords - targetCoords) > executeDistance() + 0.5 then
+        Framework.Notify(_L('execute_not_in_range'), 'error')
+        return
+    end
+
+    isExecuting = true
+
+    -- Round trip: the server validates the execution start (target downed,
+    -- distance, double-execute guard) BEFORE the progress bar even shows.
+    Framework.TriggerCallback('amb_server:executeStart', function(ok, reason)
+        if not ok then
+            isExecuting = false
+
+            if reason == 'distance' then
+                Framework.Notify(_L('execute_not_in_range'), 'error')
+            else
+                Framework.Notify(_L('execute_invalid'), 'error')
+            end
+
+            return
+        end
+
+        local completed = Framework.ProgressBar(_L('executing_player'), executeTime(), {
+            dict = 'amb@medic@standing@kneel@base',
+            anim = 'base'
+        })
+
+        isExecuting = false
+
+        if completed then
+            -- Final validation happens server side again.
+            TriggerServerEvent('amb_server:executePlayer', id)
+        else
+            TriggerServerEvent('amb_server:cancelExecute', id)
+            Framework.Notify(_L('execute_cancelled'), 'error')
+        end
+    end, id)
+end
+
+RegisterNetEvent('amb_client:executeInvalid', function(reason)
+    isExecuting = false
+
+    if reason == 'distance' then
+        Framework.Notify(_L('execute_not_in_range'), 'error')
+    else
+        Framework.Notify(_L('execute_invalid'), 'error')
+    end
+end)
+
 local function registerTargets()
-    if Config.Search.Enabled == false and Config.Carry.Enabled == false then
+    if Config.Search.Enabled == false and Config.Carry.Enabled == false
+        and not executeEnabled() then
         return
     end
 
@@ -199,6 +290,10 @@ local function registerTargets()
 
         return entity ~= PlayerPedId() and isDownedPed(entity) and carryingSrc == 0
             and not exports.plt_ambulance_job:IsPlayerFinished(id)
+    end
+
+    local function canExecuteDowned(entity)
+        return canInteractDowned(entity) and isSelfAlive() and not isExecuting
     end
 
     if GetResourceState('ox_target') == 'started' then
@@ -223,6 +318,17 @@ local function registerTargets()
                 distance = 2.0,
                 canInteract = canInteractDowned,
                 onSelect = function(data) startCarry(data.entity) end
+            }
+        end
+
+        if executeEnabled() then
+            options[#options + 1] = {
+                name = 'amb_execute_downed',
+                label = _L('execute_player'),
+                icon = 'fa-solid fa-skull-crossbones',
+                distance = executeDistance(),
+                canInteract = canExecuteDowned,
+                onSelect = function(data) executeAction(data.entity) end
             }
         end
 
@@ -251,6 +357,16 @@ local function registerTargets()
                 icon = 'fa-solid fa-person',
                 canInteract = canInteractDowned,
                 action = function(entity) startCarry(entity) end
+            }
+        end
+
+        if executeEnabled() then
+            options[#options + 1] = {
+                name = 'amb_execute_downed',
+                label = _L('execute_player'),
+                icon = 'fa-solid fa-skull-crossbones',
+                canInteract = canExecuteDowned,
+                action = function(entity) executeAction(entity) end
             }
         end
 

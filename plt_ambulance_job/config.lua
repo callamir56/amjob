@@ -139,10 +139,10 @@ Config.Health = {
     -- automatically requesting a medic. 0 disables the crawl phase entirely.
     CrawlTime = 15000,
     MaxInjuryLevel = 5,       
-    DeathTimer = 300,         
+    DeathTimer = 600,         
     UnconsciousTimer = 30,    
     CallEMSTimer = 0,        
-    HospitalTransportDelay = 120, 
+    HospitalTransportDelay = 600, 
     ClearInventoryOnHospitalRespawn = false, 
 
     BleedChance = 0,         
@@ -194,8 +194,9 @@ Config.ClothingRemoval = {
 }
 
 Config.Deathscreen = {
-    -- Death screen stays off while the death system is removed.
-    UseBuiltIn = false
+    -- Built-in death screen (same UI as before: ECG monitor, status headline,
+    -- timer and the Call EMS button).
+    UseBuiltIn = true
 }
 
 Config.LocalDoctor = {
@@ -247,22 +248,81 @@ Config.Carry = {
 
 --[[
     ------------------------------------------------------------------
-    DEATH SYSTEM: REMOVED
+    DEATH SYSTEM (client/death.lua + server/death.lua)
     ------------------------------------------------------------------
-    The death system is currently REMOVED. While Config.DisableDeathSystem
-    is true this resource does not touch death at all:
+    Full spec:
+      * ANY fatal damage -> DOWNED / CRITICAL: the player is on the ground,
+        cannot move normally (crawl only), cannot use weapons, cannot
+        respawn normally. The death UI opens with the timer and a one-time
+        CALL EMS. The downed state is synced so other players can see it.
+      * KILLER detection: name / server id / weapon are captured at the
+        moment of death and validated server side.
+      * EXECUTE: another player can finish the downed player through the
+        target interaction (ox_target / qb-target) with a progress bar.
+        Distance, state and cooldown are validated SERVER side.
+      * GIVE UP: available after GiveUpTime seconds -> final death.
+      * TIMER: server-authoritative elapsed time; when DeathTimer runs out
+        the player bleeds out -> final death (FINISHED).
+      * FINISHED: completely dead, no revive, no EMS, no actions. If
+        RespawnEnabled, after RespawnSeconds the player respawns in front
+        of the hospital with their entire ox_inventory wiped.
+      * Revive (EMS) resets every state; disconnect and resource restart
+        clean everything up.
 
-      * no downed / unconscious state;
-      * no death screen, no EMS auto call, no hospital transport;
-      * no finish / mercy logic, no 10 minute timer, no inventory wipe;
-      * medics cannot revive or body-bag (no player is ever downed);
-      * death behaves exactly like vanilla GTA / your framework default.
-
-    The files client/death.lua and server/death.lua are not loaded while it
-    is removed. Set it back to false once the new death system is specced
-    and implemented.
+    Set Config.DisableDeathSystem = true to switch back to "do not touch
+    death at all".
 ]]
-Config.DisableDeathSystem = true
+Config.DisableDeathSystem = false
+
+Config.DeathSystem = {
+    Enabled = true,
+
+    -- Health a downed player is pinned at (the "1 HP" sliver; the engine
+    -- needs it above 100 so it does not auto-kill the ped).
+    DownedHealth = 110,
+    -- Below this health the player is downed.
+    DownedThreshold = 125,
+
+    -- Limited movement while downed: crawl on the ground.
+    CrawlEnabled = true,
+
+    -- Death timer (seconds). When it runs out the player bleeds out and is
+    -- FINISHED. Shown in the UI as mm:ss, computed from the
+    -- server-authoritative downed time.
+    DeathTimer = 600,        -- 10 minutes
+
+    -- GIVE UP unlocks after this many seconds (0 = always available).
+    GiveUpTime = 60,
+
+    -- Execute (finish the downed player through the target interaction).
+    ExecuteEnabled = true,
+    -- Distance in meters for the execute interaction (server validated).
+    ExecuteDistance = 2.0,
+    -- Progress bar duration (ms).
+    ExecuteTime = 5000,
+
+    -- Ignore all damage for this long after the resource starts (ms).
+    SpawnGraceMs = 10000,
+
+    -- Hospital transport while downed (UI button + key). Off for now.
+    AllowHospitalTransport = false,
+
+    -- Finished players: hospital respawn after RespawnSeconds with the
+    -- entire ox_inventory wiped.
+    RespawnEnabled = true,
+    RespawnSeconds = 600,
+}
+
+-- Mercy (finished) extras: inventory behaviour + hospital spawn.
+Config.Mercy = {
+    Enabled = true,
+    -- Fallback hospital spawn when no check-in bed is configured.
+    HospitalCoords = { x = 307.7, y = -590.8, z = 43.3, h = 0.0 },
+    -- Wipe the player's entire ox_inventory when the mercy timer ends.
+    ClearInventory = true,
+    -- Legacy behaviour: drop the inventory at the body instead of wiping it.
+    DropInventory = false,
+}
 
 Config.ShowFakePlayers = true
 Config.FakePlayers = {

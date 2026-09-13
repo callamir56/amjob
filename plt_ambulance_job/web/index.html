@@ -1030,13 +1030,21 @@
             <div class="ds-headline-status" id="death-status-text">
                 <span class="ds-status-prefix">YOU ARE</span> <span class="ds-status-keyword">DEAD</span>
             </div>
-            <div class="ds-headline-sub">Assess your condition below</div>
+            <div class="ds-headline-sub" id="ds-headline-sub">Assess your condition below</div>
+            <div class="ds-killer hidden" id="death-killer-block">
+                <div class="ds-killer-title">KILLED BY</div>
+                <div class="ds-killer-name" id="death-killer-name">UNKNOWN</div>
+                <div class="ds-killer-meta" id="death-killer-meta">ID: &mdash; &nbsp;|&nbsp; WEAPON: &mdash;</div>
+            </div>
             <div class="ds-actions">
                 <button class="ds-action-btn call" id="ds-btn-call-ems">
                     <i class="fas fa-tower-broadcast"></i> CALL EMS [G]
                 </button>
                 <button class="ds-action-btn hospital" id="ds-btn-go-hospital">
                     <i class="fas fa-truck-medical"></i> GO TO HOSPITAL [Y]
+                </button>
+                <button class="ds-action-btn giveup" id="ds-btn-give-up">
+                    <i class="fas fa-skull"></i> GIVE UP
                 </button>
             </div>
         </div>

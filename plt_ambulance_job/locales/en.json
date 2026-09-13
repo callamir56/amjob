@@ -277,6 +277,18 @@
     "carry_started": "You are carrying the player. /putdown to drop them.",
     "carry_dropped": "You put the player down.",
     "carry_already": "You are already carrying someone.",
-    "player_finished_self": "You have been finished. You will respawn at the hospital in {minutes} minutes with all of your items wiped.",
-    "player_finished_other": "This player has been finished."
+    "player_finished_self": "You have been finished. You are completely dead.",
+    "player_finished_other": "This player has been finished.",
+    "ui_weapon_unknown": "UNKNOWN",
+    "execute_player": "Execute",
+    "executing_player": "EXECUTING PLAYER...",
+    "execute_do_not_move": "Do not move",
+    "execute_cancelled": "Execute cancelled.",
+    "execute_invalid": "You cannot execute this player.",
+    "execute_not_in_range": "You are too far away to execute.",
+    "execute_success": "Player executed.",
+    "being_executed": "You are being executed by {name}!",
+    "give_up": "GIVE UP",
+    "give_up_locked": "GIVE UP LOCKED ({seconds}s)",
+    "give_up_unavailable": "You cannot give up yet."
 }
