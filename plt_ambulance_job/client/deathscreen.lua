@@ -292,13 +292,13 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
 
     toggleDeathScreen(true, deathTimer, deathMode)
 
-    -- Accurate, CONTINUOUS countdown: the remaining time is recomputed from
-    -- ONE fixed end timestamp every tick (GetGameTimer is engine time, so
-    -- lag / freezes cannot drift it), and the start point is the
-    -- server-authoritative downed time. The timestamp is set once here and
-    -- adjusted once from the server - never recreated, never reset, and the
-    -- countdown keeps ticking through FINISH (finished mode shows the same
-    -- clock running out, it does not restart it).
+    -- Accurate countdown: the remaining time is recomputed from a fixed end
+    -- timestamp every tick (GetGameTimer is engine time, so lag / freezes
+    -- cannot drift it), and the downed start point is the
+    -- server-authoritative downed time. The downed timestamp is set once
+    -- here and adjusted once from the server - never recreated, never
+    -- reset mid-phase. While FINISHED, this same thread ticks the OWN
+    -- finished clock (finishedEndTime) down to the hospital respawn.
     CreateThread(function()
         local durationSeconds = deathSystemActive()
             and deathTimerSeconds()
