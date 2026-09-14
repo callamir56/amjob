@@ -44,9 +44,11 @@ local isCarried = false
 local isTreated = false
 local isBeingExecuted = false
 local finishedPoseFrozen = false -- freeze applied only AFTER the body is on the ground
+local finishedGroundedAt = 0 -- game time the finished ragdoll was first seen (settle staging)
 
 local lastAttackerEntity = 0
 local lastDamageWeapon = 0
+local restoreRequested = false -- reconnect restore runs once per session
 
 -- Common weapon hashes -> display labels (UI shows UNKNOWN for the rest).
 local WEAPON_LABELS = {
@@ -372,7 +374,7 @@ local function reportKillerToServer(info)
         tonumber(info.src) or 0, tonumber(info.weaponHash) or 0)
 end
 
-local function enterDowned(reason)
+local function enterDowned(reason, skipKillerReport)
     if state ~= State.ALIVE then
         return
     end
@@ -420,7 +422,12 @@ local function enterDowned(reason)
 
     markDowned(killerInfo)
 
-    reportKillerToServer(killerInfo)
+    -- A reconnect restore already has its killer persisted server side (and
+    -- the server re-sends it); reporting a fresh UNKNOWN capture here would
+    -- clobber it.
+    if not skipKillerReport then
+        reportKillerToServer(killerInfo)
+    end
 
     Framework.Notify(_L('crawl_wounded', {
         seconds = math.floor((Config.DeathSystem.DeathTimer or 600))
@@ -461,14 +468,17 @@ local function enterFinished(reason)
     -- reported bug). The FINISHED loop below freezes only once the body is
     -- confirmed on the ground.
     finishedPoseFrozen = false
+    finishedGroundedAt = 0
     dropLifeless(ped)
 
     markDowned()
 
     print(('^1[DEATH]^7 FINISHED (%s)'):format(tostring(reason)))
 
-    -- The server requires the player to be downed before it accepts the
-    -- finish; give the downed state a moment to arrive first.
+    -- Echo to the server (the server only accepts finishes for the real,
+    -- checked completion reasons - timer / give up - plus the finishes it
+    -- initiated itself; anything else is ignored, so this echo can never
+    -- finish a player on its own).
     SetTimeout(100, function()
         TriggerServerEvent('amb_server:finishPlayer', reason or 'damage')
     end)
@@ -614,6 +624,7 @@ CreateThread(function()
                 -- and re-evaluate the freeze (the old latch is invalid now).
                 dropLifeless(ped)
                 finishedPoseFrozen = false
+                finishedGroundedAt = 0
             end
 
             local health = GetEntityHealth(ped)
@@ -631,28 +642,40 @@ CreateThread(function()
             SetBlockingOfNonTemporaryEvents(ped, true)
 
             -- FINAL DEAD = FULLY IMMOBILE: the ONLY state allowed to freeze.
-            -- But the freeze is applied ONLY after the body is confirmed on
-            -- the ground (ragdoll engaged or inside a vehicle). Freezing in
-            -- the same tick as the ragdoll start blocks the ragdoll and
-            -- leaves the ped standing frozen - and a merely DOWNED player
-            -- must never be frozen at all.
+            -- But the freeze engages ONCE, and only after the body is
+            -- CONFIRMED lying on the ground: ragdoll physics must stay
+            -- continuously active long enough for the body to fall and
+            -- settle. Freezing the moment the ragdoll starts - while the
+            -- body may still be upright - locks the ped STANDING and
+            -- frozen (the reported FINISH -> STAND -> FREEZE bug). A merely
+            -- DOWNED player must never be frozen at all. While the latch
+            -- holds, no freeze/ragdoll native is called every frame.
             if IsPedInAnyVehicle(ped, false) then
-                FreezeEntityPosition(ped, true)
-                finishedPoseFrozen = true
-            elseif IsPedRagdoll(ped) then
-                -- Body ragdolled on the ground: freeze the pose in place.
-                FreezeEntityPosition(ped, true)
-                finishedPoseFrozen = true
-            elseif finishedPoseFrozen then
-                -- Ragdoll physics stop reporting while frozen: keep the
-                -- freeze instead of cycling it every frame.
-                FreezeEntityPosition(ped, true)
-            else
-                -- Standing, falling or lying without ragdoll physics:
-                -- release any freeze and force the fall again. The freeze
-                -- engages on the next frame once the ragdoll starts.
-                FreezeEntityPosition(ped, false)
-                SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
+                -- Inside a vehicle there is no fall to stage: freeze once.
+                if not finishedPoseFrozen then
+                    FreezeEntityPosition(ped, true)
+                    finishedPoseFrozen = true
+                end
+            elseif not finishedPoseFrozen then
+                if IsPedRagdoll(ped) then
+                    if finishedGroundedAt == 0 then
+                        finishedGroundedAt = now
+                    elseif now - finishedGroundedAt >= 2000 then
+                        -- Ragdoll active for 2s: the body has hit the ground
+                        -- and settled - freeze the pose in place, once.
+                        FreezeEntityPosition(ped, true)
+                        finishedPoseFrozen = true
+                    end
+                    -- else: ragdoll active but the body is still falling or
+                    -- settling - wait. Neither freeze nor restart anything.
+                else
+                    -- No ragdoll physics: the body stood up - drop it again
+                    -- and restart the settle timer. This runs only until the
+                    -- ragdoll engages (normally a single frame), never as a
+                    -- per-frame restart loop.
+                    finishedGroundedAt = 0
+                    SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
+                end
             end
         end
     end
@@ -687,6 +710,7 @@ RegisterNetEvent('amb_client:finishRefused', function()
     downedAt = GetGameTimer()
 
     finishedPoseFrozen = false
+    finishedGroundedAt = 0
     finishRetries = finishRetries + 1
 
     print(('^3[DEATH]^7 finish refused by server (attempt %s), retrying...'):format(tostring(finishRetries)))
@@ -714,19 +738,14 @@ RegisterNetEvent('amb_client:finishRefused', function()
     end)
 end)
 
--- Someone started executing us: pose the limp body for the execution.
+-- Someone started executing us: the body is ALREADY a limp ragdoll lying on
+-- the ground - leave it exactly as it is. Clearing its tasks here would END
+-- the ragdoll (the ped stands back up) and freezing in the same tick would
+-- lock it STANDING and frozen: the reported FINISH -> STAND -> FREEZE bug.
+-- The DOWNED loop below keeps the freeze off and the ragdoll in place for
+-- the whole execution; the FINISHED transition drops the body again anyway.
 RegisterNetEvent('amb_client:executionStarted', function(executorSrc, executorName)
     isBeingExecuted = true
-
-    local ped = PlayerPedId()
-
-    if ped and ped ~= 0 and DoesEntityExist(ped) then
-        dropLifeless(ped)
-
-        -- During the execution the body may be frozen so the executor's
-        -- animation lines up cleanly.
-        FreezeEntityPosition(ped, true)
-    end
 
     Framework.Notify(_L('being_executed', {
         name = tostring(executorName or ('Player ' .. tostring(executorSrc or '?')))
@@ -799,6 +818,7 @@ AddEventHandler('amb_client:onPlayerRevive', function()
     DisablePlayerFiring(PlayerId(), false)
 
     finishedPoseFrozen = false
+    finishedGroundedAt = 0
 
     local ped = PlayerPedId()
 
@@ -829,6 +849,7 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
     DisablePlayerFiring(PlayerId(), false)
 
     finishedPoseFrozen = false
+    finishedGroundedAt = 0
 
     local ped = PlayerPedId()
 
@@ -861,6 +882,7 @@ RegisterNetEvent('amb_client:deathSystemReset', function()
     DisablePlayerFiring(PlayerId(), false)
 
     finishedPoseFrozen = false
+    finishedGroundedAt = 0
 
     local ped = PlayerPedId()
 
@@ -888,6 +910,53 @@ CreateThread(function()
     if state == State.ALIVE then
         SendNUIMessage({ action = 'amb_toggleDeathScreen', show = false })
     end
+end)
+
+-- ---------------------------------------------------------------
+-- Reconnect persistence: restore a persisted death state after spawning.
+-- ---------------------------------------------------------------
+-- The server keeps the death state (downed / finished + killer) under the
+-- player's identifier. After (re)spawning the client pulls it exactly once:
+-- a restored state re-enters DOWNED / FINISHED through the normal entry
+-- points, so pose, UI, timer and freeze behave exactly like a fresh one.
+AddEventHandler('playerSpawned', function()
+    if restoreRequested then
+        return
+    end
+
+    restoreRequested = true
+
+    CreateThread(function()
+        Wait(2500)
+
+        if state ~= State.ALIVE then
+            return
+        end
+
+        local ped = PlayerPedId()
+
+        if not ped or ped == 0 or not DoesEntityExist(ped) then
+            return
+        end
+
+        Framework.TriggerCallback('amb_server:getPersistedDeathState', function(persisted)
+            if type(persisted) ~= 'table' then
+                return
+            end
+
+            if state ~= State.ALIVE then
+                return
+            end
+
+            if persisted.state == 'finished' then
+                print('^3[DEATH]^7 restoring persisted FINAL DEAD state after reconnect.')
+                enterFinished('reconnect restore')
+            elseif persisted.state == 'downed' then
+                print('^3[DEATH]^7 restoring persisted DOWNED state after reconnect.')
+                enterDowned('reconnect restore', true)
+            end
+        end)
+    end)
 end)
 
 -- ---------------------------------------------------------------
