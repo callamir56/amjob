@@ -47,20 +47,22 @@ local downedPoseState = nil -- nil | 'still' | 'fwd' | 'bwd' (crawl pose)
 local lastAttackerEntity = 0
 local lastDamageWeapon = 0
 
--- The wounded crawl: 'move_crawl' keeps the ped flat on its front. The
--- moving variant (flag 47) moves the ped through the world while the
--- animation plays; the still variant (flag 46) loops in place. WASD input
--- drives it, so the ped CRAWLS on the ground instead of standing up.
+-- The wounded crawl - the exact technique from the proven crouch_crawl
+-- resource. 'move_crawl' is a built-in GTA V animation dictionary (no
+-- custom .ycd). onfront_fwd / onfront_bwd keep the ped flat on its front.
 --
--- IMPORTANT: 'move_crawl' is a movement ANIM SET (clipset), NOT an animation
--- dictionary. It must be loaded with RequestAnimSet / HasAnimSetLoaded -
--- RequestAnimDict would never load it, the animation would never play and
--- the ped would stand back up and walk (the reported bug).
-local CRAWL_SET = 'move_crawl'
+--   * Idle:   TaskPlayAnimAdvanced, flag 2 (loop) - lies flat in place.
+--   * Move:   TaskPlayAnim, flag 2 (loop) - the looping animation's own
+--             motion carries the ped over the ground.
+--   * WASD:   W = crawl forward, S = crawl backward, A/D = turn on the spot.
+--
+-- The get-up transitions from the resource (move_crawlprone2crawlfront,
+-- get_up@directional@*) are NEVER used here: while downed the ped must not
+-- get up - only REVIVE or EXECUTE may end the crawl.
+local CRAWL_DICT = 'move_crawl'
 local CRAWL_ANIM_FWD = 'onfront_fwd'
 local CRAWL_ANIM_BWD = 'onfront_bwd'
-local CRAWL_FLAG_STILL = 46
-local CRAWL_FLAG_MOVE = 47
+local CRAWL_FLAG_LOOP = 2
 
 -- Common weapon hashes -> display labels (UI shows UNKNOWN for the rest).
 local WEAPON_LABELS = {
@@ -212,16 +214,69 @@ local function leaveVehicle(ped)
     end
 end
 
+-- Loader exactly like the crouch_crawl resource: RequestAnimDict + Wait(0)
+-- until the dictionary is really loaded. A generous safety timeout keeps the
+-- thread from ever getting stuck. Loaded once when the player goes down and
+-- kept loaded for the whole down.
+local function loadCrawlDict()
+    if HasAnimDictLoaded(CRAWL_DICT) then
+        return true
+    end
+
+    RequestAnimDict(CRAWL_DICT)
+
+    local waited = 0
+
+    while not HasAnimDictLoaded(CRAWL_DICT) and waited < 5000 do
+        Wait(0)
+        waited = waited + 1
+    end
+
+    return HasAnimDictLoaded(CRAWL_DICT)
+end
+
+-- Idle crawl (reference PlayIdleCrawlAnim): loop flat on the front, in place.
+local function playIdleCrawlAnim(ped, heading)
+    local coords = GetEntityCoords(ped)
+
+    TaskPlayAnimAdvanced(
+        ped,
+        CRAWL_DICT,
+        CRAWL_ANIM_FWD,
+        coords.x, coords.y, coords.z,
+        0.0, 0.0,
+        heading or GetEntityHeading(ped),
+        2.0,            -- blend in
+        2.0,            -- blend out
+        -1,             -- duration: loop
+        CRAWL_FLAG_LOOP,
+        1.0,            -- playback rate
+        false, false
+    )
+end
+
+-- Moving crawl (reference): the looping anim's own motion carries the ped.
+local function playCrawlForward(ped)
+    TaskPlayAnim(ped, CRAWL_DICT, CRAWL_ANIM_FWD,
+        8.0, -8.0, -1, CRAWL_FLAG_LOOP, 0.0, false, false, false)
+end
+
+local function playCrawlBackward(ped)
+    TaskPlayAnim(ped, CRAWL_DICT, CRAWL_ANIM_BWD,
+        8.0, -8.0, -1, CRAWL_FLAG_LOOP, 0.0, false, false, false)
+end
+
 -- DOWNED pose / crawl state controller.
 --
--- RULES (this is a state controller, NOT a per-frame animation trigger):
+-- RULES (state-based, NOT a per-frame animation trigger):
 --  * The ped is NEVER frozen while downed - FreezeEntityPosition belongs to
 --    FINISHED only (a short freeze while being executed is allowed).
 --  * WASD = crawl: W/S move forward/backward on the ground, A/D turn.
 --    Standing, walking, running, jumping, weapons and vehicles stay blocked
 --    (see enforceDownedControls below).
---  * The animation is re-applied ONLY when the task was really lost (engine
---    interruption, ragdoll ended, or the ped somehow stood up) - it is never
+--  * The animation is applied on INPUT TRANSITIONS only. Every frame just
+--    checks whether it is still playing; it is re-applied ONLY when another
+--    task really interrupted it (or the ped somehow stood up). It is never
 --    restarted frame after frame while it is playing.
 local function applyCrawlPose(ped)
     if not crawlEnabled() or IsPedInAnyVehicle(ped, false) or isCarried or isBeingExecuted then
@@ -232,24 +287,17 @@ local function applyCrawlPose(ped)
     FreezeEntityPosition(ped, false)
 
     if IsPedRagdoll(ped) then
-        -- Let the ragdoll settle; the pose is re-applied once it ends.
+        -- Initial fall: let the ragdoll settle; the controller re-applies
+        -- the pose as soon as the ragdoll ends. Ragdoll is ONLY for the
+        -- fall, never a permanent state.
         return
     end
 
-    -- Load the crawl anim set (clipset) the correct way and wait until it is
-    -- really loaded before playing anything.
-    if not HasAnimSetLoaded(CRAWL_SET) then
-        RequestAnimSet(CRAWL_SET)
-
-        local waited = 0
-
-        while not HasAnimSetLoaded(CRAWL_SET) and waited < 3000 do
-            Wait(0)
-            waited = waited + 1
-        end
+    -- Load once (kept loaded for the whole down).
+    if not loadCrawlDict() then
+        return
     end
 
-    local coords = GetEntityCoords(ped)
     local heading = GetEntityHeading(ped)
 
     local moveAxis = GetControlNormal(0, 31)
@@ -258,16 +306,13 @@ local function applyCrawlPose(ped)
 
     -- Apply the animation on input transitions only.
     if downedPoseState ~= 'fwd' and wantFwd and not wantBwd then
-        TaskPlayAnimAdvanced(ped, CRAWL_SET, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
-            1.0, 1.0, 1.0, CRAWL_FLAG_MOVE, 1.0, 0, 0)
+        playCrawlForward(ped)
         downedPoseState = 'fwd'
     elseif downedPoseState ~= 'bwd' and wantBwd and not wantFwd then
-        TaskPlayAnimAdvanced(ped, CRAWL_SET, CRAWL_ANIM_BWD, coords, 1.0, 0.0, heading,
-            1.0, 1.0, 1.0, CRAWL_FLAG_MOVE, 1.0, 0, 0)
+        playCrawlBackward(ped)
         downedPoseState = 'bwd'
     elseif downedPoseState ~= 'still' and not wantFwd and not wantBwd then
-        TaskPlayAnimAdvanced(ped, CRAWL_SET, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
-            1.0, 1.0, 1.0, CRAWL_FLAG_STILL, 1.0, 0, 0)
+        playIdleCrawlAnim(ped, heading)
         downedPoseState = 'still'
     end
 
@@ -280,41 +325,50 @@ local function applyCrawlPose(ped)
         end
     end
 
-    -- Guard: only re-apply when the task is really gone (engine cleared it,
-    -- ragdoll ended, or the ped stood up). Never restarts while the ped is
-    -- actually playing or crawling.
+    -- Guard: only re-apply when the task is really gone (another task
+    -- cleared it, or the ped somehow stood up). Never restarts the anim
+    -- while it is playing or while the ped is actually crawling.
     local currentAnim = (downedPoseState == 'bwd') and CRAWL_ANIM_BWD or CRAWL_ANIM_FWD
-    local playing = IsEntityPlayingAnim(ped, CRAWL_SET, currentAnim, 3)
+    local playing = IsEntityPlayingAnim(ped, CRAWL_DICT, currentAnim, 3)
     local stoodUp = GetEntityHeightAboveGround(ped) > 0.6 or IsPedGettingUp(ped)
     local moving = GetEntitySpeed(ped) > 0.3
 
-    if stoodUp or (not playing and (downedPoseState == 'still' or not moving)) then
-        local flag = (downedPoseState == 'fwd' or downedPoseState == 'bwd')
-            and CRAWL_FLAG_MOVE or CRAWL_FLAG_STILL
-
-        -- Decisive correction: the task is really gone (or the ped stood
-        -- up). Clear whatever is holding the ped upright, then drop it back
-        -- into the pose. Only THIS branch ever clears tasks - it is a
-        -- conditional correction, never a blind per-frame clear.
+    if stoodUp or (not playing and not moving) then
+        -- Decisive correction: whatever cleared the task (or stood the ped
+        -- up) is removed, then the current pose is applied again. Only THIS
+        -- branch ever clears tasks - it is a conditional correction, never a
+        -- blind per-frame clear.
         ClearPedTasksImmediately(ped)
 
-        TaskPlayAnimAdvanced(ped, CRAWL_SET, currentAnim, GetEntityCoords(ped), 1.0, 0.0,
-            GetEntityHeading(ped), 1.0, 1.0, 1.0, flag, 1.0, 0, 0)
+        if downedPoseState == 'fwd' then
+            playCrawlForward(ped)
+        elseif downedPoseState == 'bwd' then
+            playCrawlBackward(ped)
+        else
+            playIdleCrawlAnim(ped, GetEntityHeading(ped))
+        end
     end
 end
 
--- Fully releases the crawl state: animation stopped, freeze lifted. Safe to
--- call from revive / carry / CPR / execution / reset paths.
+-- Fully releases the crawl state: animation stopped, movement clipsets
+-- restored, freeze lifted. Safe to call from revive / carry / CPR /
+-- execution / reset paths.
 local function stopCrawlPose(ped)
     downedPoseState = nil
 
-    if IsEntityPlayingAnim(ped, CRAWL_SET, CRAWL_ANIM_FWD, 3) then
-        StopAnimTask(ped, CRAWL_SET, CRAWL_ANIM_FWD, 1.0)
+    if IsEntityPlayingAnim(ped, CRAWL_DICT, CRAWL_ANIM_FWD, 3) then
+        StopAnimTask(ped, CRAWL_DICT, CRAWL_ANIM_FWD, 1.0)
     end
 
-    if IsEntityPlayingAnim(ped, CRAWL_SET, CRAWL_ANIM_BWD, 3) then
-        StopAnimTask(ped, CRAWL_SET, CRAWL_ANIM_BWD, 1.0)
+    if IsEntityPlayingAnim(ped, CRAWL_DICT, CRAWL_ANIM_BWD, 3) then
+        StopAnimTask(ped, CRAWL_DICT, CRAWL_ANIM_BWD, 1.0)
     end
+
+    -- Revive requirement: restore the normal movement clipsets so the
+    -- player walks / runs normally again.
+    ResetPedMovementClipset(ped, 0.5)
+    ResetPedStrafeClipset(ped)
+    ResetPedWeaponMovementClipset(ped)
 
     FreezeEntityPosition(ped, false)
 end
