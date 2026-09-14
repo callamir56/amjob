@@ -43,6 +43,7 @@ local isCarried = false
 local isTreated = false
 local isBeingExecuted = false
 local downedPoseState = nil -- nil | 'still' | 'fwd' | 'bwd' (crawl pose)
+local finishedPoseFrozen = false -- freeze applied only AFTER the body is on the ground
 
 local lastAttackerEntity = 0
 local lastDamageWeapon = 0
@@ -566,12 +567,15 @@ local function enterFinished(reason)
 
     DisablePlayerFiring(PlayerId(), true)
 
-    -- FINAL DEAD = FULLY IMMOBILE: no animation, ragdoll on the ground and
-    -- the entity frozen. Freeze is allowed ONLY here (and briefly while
-    -- being executed), never while merely downed.
+    -- FINAL DEAD = FULLY IMMOBILE: no animation, ragdoll on the ground.
+    -- IMPORTANT: do NOT freeze here - the ped was just resurrected and is
+    -- standing; freezing in the same tick as the ragdoll start blocks the
+    -- ragdoll transition and leaves the ped STANDING and frozen (the
+    -- reported bug). The FINISHED loop below freezes only once the body is
+    -- confirmed on the ground.
+    finishedPoseFrozen = false
     stopCrawlPose(ped)
     dropLifeless(ped)
-    FreezeEntityPosition(ped, true)
 
     markDowned()
 
@@ -675,6 +679,11 @@ CreateThread(function()
             -- IMPORTANT: damage does NOT finish a downed player. The state
             -- machine only moves DOWNED -> FINISHED through EXECUTE, the
             -- server-validated timer or GIVE UP. Bullets just keep him down.
+            --
+            -- DOWNED is NEVER frozen: this clears any leftover freeze (e.g.
+            -- a cancelled execution) before the crawl takes over.
+            FreezeEntityPosition(ped, false)
+
             enforceDownedControls()
 
             if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
@@ -712,8 +721,10 @@ CreateThread(function()
             if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
                 ped = resurrectLocalPlayer(ped)
 
-                -- A resurrected ped stands up: put the body back on the ground.
+                -- A resurrected ped stands up: put the body back on the ground
+                -- and re-evaluate the freeze (the old latch is invalid now).
                 dropLifeless(ped)
+                finishedPoseFrozen = false
             end
 
             local health = GetEntityHealth(ped)
@@ -731,14 +742,28 @@ CreateThread(function()
             SetBlockingOfNonTemporaryEvents(ped, true)
 
             -- FINAL DEAD = FULLY IMMOBILE: the ONLY state allowed to freeze.
-            FreezeEntityPosition(ped, true)
-
-            if not IsPedInAnyVehicle(ped, false) and not IsPedRagdoll(ped) then
-                if IsPedGettingUp(ped) or IsPedWalking(ped) or IsPedRunning(ped)
-                    or IsPedJumping(ped) or GetEntitySpeed(ped) > 0.5
-                    or GetEntityHeightAboveGround(ped) > 0.5 then
-                    SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
-                end
+            -- But the freeze is applied ONLY after the body is confirmed on
+            -- the ground (ragdoll engaged or inside a vehicle). Freezing in
+            -- the same tick as the ragdoll start blocks the ragdoll and
+            -- leaves the ped standing frozen - and a merely DOWNED player
+            -- must never be frozen at all.
+            if IsPedInAnyVehicle(ped, false) then
+                FreezeEntityPosition(ped, true)
+                finishedPoseFrozen = true
+            elseif IsPedRagdoll(ped) then
+                -- Body ragdolled on the ground: freeze the pose in place.
+                FreezeEntityPosition(ped, true)
+                finishedPoseFrozen = true
+            elseif finishedPoseFrozen then
+                -- Ragdoll physics stop reporting while frozen: keep the
+                -- freeze instead of cycling it every frame.
+                FreezeEntityPosition(ped, true)
+            else
+                -- Standing, falling or lying without ragdoll physics:
+                -- release any freeze and force the fall again. The freeze
+                -- engages on the next frame once the ragdoll starts.
+                FreezeEntityPosition(ped, false)
+                SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
             end
         end
     end
@@ -772,6 +797,7 @@ RegisterNetEvent('amb_client:finishRefused', function()
     state = State.DOWNED
     downedAt = GetGameTimer()
 
+    finishedPoseFrozen = false
     finishRetries = finishRetries + 1
 
     print(('^3[DEATH]^7 finish refused by server (attempt %s), retrying...'):format(tostring(finishRetries)))
@@ -890,6 +916,8 @@ AddEventHandler('amb_client:onPlayerRevive', function()
 
     DisablePlayerFiring(PlayerId(), false)
 
+    finishedPoseFrozen = false
+
     local ped = PlayerPedId()
 
     if ped and ped ~= 0 and DoesEntityExist(ped) then
@@ -917,6 +945,8 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
     isBeingExecuted = false
 
     DisablePlayerFiring(PlayerId(), false)
+
+    finishedPoseFrozen = false
 
     local ped = PlayerPedId()
 
@@ -947,6 +977,8 @@ RegisterNetEvent('amb_client:deathSystemReset', function()
     finishRetries = 0
 
     DisablePlayerFiring(PlayerId(), false)
+
+    finishedPoseFrozen = false
 
     local ped = PlayerPedId()
 
