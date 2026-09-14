@@ -229,14 +229,16 @@ local function applyDownedLimp(ped)
     SetPedCanPlayAmbientBaseAnims(ped, false)
     SetBlockingOfNonTemporaryEvents(ped, true)
 
-    if not IsPedRagdoll(ped) then
+    if not IsPedRagdoll(ped) or IsPedGettingUp(ped) then
         -- The limp state was lost (task cleared / ped stood up): remove
         -- whatever took over and drop the body again. Only THIS branch ever
         -- clears tasks - a conditional correction, not a blind per-frame
-        -- clear.
+        -- clear, and it never teleports the ped.
         ClearPedTasksImmediately(ped)
 
-        SetPedToRagdoll(ped, 99999999, 99999999, 0, false, false, false)
+        -- Full GTA V physics ragdoll, type 0 (CTaskNMRelax - the networked
+        -- type). Duration -1 keeps the body limp until the state ends.
+        SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
     end
 end
 
@@ -277,7 +279,10 @@ local function dropLifeless(ped)
     SetPedCanPlayAmbientBaseAnims(ped, false)
     SetBlockingOfNonTemporaryEvents(ped, true)
 
-    SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
+    -- Type 0 (CTaskNMRelax): the only ragdoll type that works for networked
+    -- players in FiveM (type 1 / CTaskNMScriptControl is hardcoded off in
+    -- networked environments).
+    SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
 end
 
 -- Keeps health.lua / the server / the deathscreen in sync through the
@@ -388,12 +393,12 @@ local function enterDowned(reason)
     SetEntityHealth(ped, downedHealth())
     lastHealth = downedHealth()
 
-    -- DOWNED peds are invincible: bullets, falls and explosions must NOT
-    -- churn the death state (the engine would keep killing / resurrecting
-    -- the ped). Only EXECUTE, the server-validated timer and GIVE UP can
-    -- finish a downed player. Reset to false on revive / respawn.
-    SetEntityInvincible(ped, true)
-    SetEntityProofs(ped, false, false, false, false, false, false, false, false)
+    -- IMPORTANT: the ped must NOT be made invincible here. An invincible
+    -- ped ignores SetPedToRagdoll - the body would stay standing and
+    -- motionless (the reported "standing frozen" bug). Damage immunity comes
+    -- from entity proofs instead, which do NOT affect scripted ragdolls.
+    SetEntityInvincible(ped, false)
+    SetEntityProofs(ped, true, true, true, true, true, true, true, true)
 
     DisablePlayerFiring(PlayerId(), true)
 
@@ -441,10 +446,11 @@ local function enterFinished(reason)
     SetEntityHealth(ped, downedHealth())
     lastHealth = downedHealth()
 
-    -- FINISHED bodies stay invincible too: stray bullets cannot churn the
-    -- corpse (the loop below never has to resurrect it again).
-    SetEntityInvincible(ped, true)
-    SetEntityProofs(ped, false, false, false, false, false, false, false, false)
+    -- Same rule as DOWNED: no invincibility (it blocks SetPedToRagdoll and
+    -- the corpse would stand upright). Entity proofs keep stray bullets out
+    -- without affecting the scripted ragdoll.
+    SetEntityInvincible(ped, false)
+    SetEntityProofs(ped, true, true, true, true, true, true, true, true)
 
     DisablePlayerFiring(PlayerId(), true)
 
@@ -576,8 +582,8 @@ CreateThread(function()
 
                 SetEntityMaxHealth(ped, 200)
                 SetEntityHealth(ped, downedHealth())
-                SetEntityInvincible(ped, true)
-                SetEntityProofs(ped, false, false, false, false, false, false, false, false)
+                SetEntityInvincible(ped, false)
+                SetEntityProofs(ped, true, true, true, true, true, true, true, true)
                 lastHealth = downedHealth()
 
                 applyDownedLimp(ped)
@@ -646,7 +652,7 @@ CreateThread(function()
                 -- release any freeze and force the fall again. The freeze
                 -- engages on the next frame once the ragdoll starts.
                 FreezeEntityPosition(ped, false)
-                SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
+                SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
             end
         end
     end
@@ -798,10 +804,11 @@ AddEventHandler('amb_client:onPlayerRevive', function()
 
     if ped and ped ~= 0 and DoesEntityExist(ped) then
         -- Revived = everything released: ragdoll ended, no freeze, no
-        -- invincibility, normal movement.
+        -- invincibility, no damage proofs, normal movement.
         releaseDownedLimp(ped)
 
         SetEntityInvincible(ped, false)
+        SetEntityProofs(ped, false, false, false, false, false, false, false, false)
         lastHealth = GetEntityHealth(ped)
 
         SetPedCanPlayAmbientAnims(ped, true)
@@ -830,6 +837,7 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
         -- the hospital respawn can stand the player up.
         ClearPedTasksImmediately(ped)
         SetEntityInvincible(ped, false)
+        SetEntityProofs(ped, false, false, false, false, false, false, false, false)
         FreezeEntityPosition(ped, false)
         SetPedCanRagdoll(ped, true)
         SetPedCanPlayAmbientAnims(ped, true)
@@ -859,6 +867,7 @@ RegisterNetEvent('amb_client:deathSystemReset', function()
     if ped and ped ~= 0 and DoesEntityExist(ped) then
         ClearPedTasksImmediately(ped)
         SetEntityInvincible(ped, false)
+        SetEntityProofs(ped, false, false, false, false, false, false, false, false)
         FreezeEntityPosition(ped, false)
         SetPedCanRagdoll(ped, true)
         SetPedCanPlayAmbientAnims(ped, true)
