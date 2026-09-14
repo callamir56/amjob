@@ -51,7 +51,12 @@ local lastDamageWeapon = 0
 -- moving variant (flag 47) moves the ped through the world while the
 -- animation plays; the still variant (flag 46) loops in place. WASD input
 -- drives it, so the ped CRAWLS on the ground instead of standing up.
-local CRAWL_DICT = 'move_crawl'
+--
+-- IMPORTANT: 'move_crawl' is a movement ANIM SET (clipset), NOT an animation
+-- dictionary. It must be loaded with RequestAnimSet / HasAnimSetLoaded -
+-- RequestAnimDict would never load it, the animation would never play and
+-- the ped would stand back up and walk (the reported bug).
+local CRAWL_SET = 'move_crawl'
 local CRAWL_ANIM_FWD = 'onfront_fwd'
 local CRAWL_ANIM_BWD = 'onfront_bwd'
 local CRAWL_FLAG_STILL = 46
@@ -231,14 +236,16 @@ local function applyCrawlPose(ped)
         return
     end
 
-    if not HasAnimDictLoaded(CRAWL_DICT) then
-        RequestAnimDict(CRAWL_DICT)
+    -- Load the crawl anim set (clipset) the correct way and wait until it is
+    -- really loaded before playing anything.
+    if not HasAnimSetLoaded(CRAWL_SET) then
+        RequestAnimSet(CRAWL_SET)
 
         local waited = 0
 
-        while not HasAnimDictLoaded(CRAWL_DICT) and waited < 1000 do
-            Wait(50)
-            waited = waited + 50
+        while not HasAnimSetLoaded(CRAWL_SET) and waited < 3000 do
+            Wait(0)
+            waited = waited + 1
         end
     end
 
@@ -251,15 +258,15 @@ local function applyCrawlPose(ped)
 
     -- Apply the animation on input transitions only.
     if downedPoseState ~= 'fwd' and wantFwd and not wantBwd then
-        TaskPlayAnimAdvanced(ped, CRAWL_DICT, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
+        TaskPlayAnimAdvanced(ped, CRAWL_SET, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
             1.0, 1.0, 1.0, CRAWL_FLAG_MOVE, 1.0, 0, 0)
         downedPoseState = 'fwd'
     elseif downedPoseState ~= 'bwd' and wantBwd and not wantFwd then
-        TaskPlayAnimAdvanced(ped, CRAWL_DICT, CRAWL_ANIM_BWD, coords, 1.0, 0.0, heading,
+        TaskPlayAnimAdvanced(ped, CRAWL_SET, CRAWL_ANIM_BWD, coords, 1.0, 0.0, heading,
             1.0, 1.0, 1.0, CRAWL_FLAG_MOVE, 1.0, 0, 0)
         downedPoseState = 'bwd'
     elseif downedPoseState ~= 'still' and not wantFwd and not wantBwd then
-        TaskPlayAnimAdvanced(ped, CRAWL_DICT, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
+        TaskPlayAnimAdvanced(ped, CRAWL_SET, CRAWL_ANIM_FWD, coords, 1.0, 0.0, heading,
             1.0, 1.0, 1.0, CRAWL_FLAG_STILL, 1.0, 0, 0)
         downedPoseState = 'still'
     end
@@ -277,8 +284,8 @@ local function applyCrawlPose(ped)
     -- ragdoll ended, or the ped stood up). Never restarts while the ped is
     -- actually playing or crawling.
     local currentAnim = (downedPoseState == 'bwd') and CRAWL_ANIM_BWD or CRAWL_ANIM_FWD
-    local playing = IsEntityPlayingAnim(ped, CRAWL_DICT, currentAnim, 3)
-    local stoodUp = GetEntityHeightAboveGround(ped) > 0.6
+    local playing = IsEntityPlayingAnim(ped, CRAWL_SET, currentAnim, 3)
+    local stoodUp = GetEntityHeightAboveGround(ped) > 0.6 or IsPedGettingUp(ped)
     local moving = GetEntitySpeed(ped) > 0.3
 
     if stoodUp or (not playing and (downedPoseState == 'still' or not moving)) then
@@ -291,7 +298,7 @@ local function applyCrawlPose(ped)
         -- conditional correction, never a blind per-frame clear.
         ClearPedTasksImmediately(ped)
 
-        TaskPlayAnimAdvanced(ped, CRAWL_DICT, currentAnim, GetEntityCoords(ped), 1.0, 0.0,
+        TaskPlayAnimAdvanced(ped, CRAWL_SET, currentAnim, GetEntityCoords(ped), 1.0, 0.0,
             GetEntityHeading(ped), 1.0, 1.0, 1.0, flag, 1.0, 0, 0)
     end
 end
@@ -301,12 +308,12 @@ end
 local function stopCrawlPose(ped)
     downedPoseState = nil
 
-    if IsEntityPlayingAnim(ped, CRAWL_DICT, CRAWL_ANIM_FWD, 3) then
-        StopAnimTask(ped, CRAWL_DICT, CRAWL_ANIM_FWD, 1.0)
+    if IsEntityPlayingAnim(ped, CRAWL_SET, CRAWL_ANIM_FWD, 3) then
+        StopAnimTask(ped, CRAWL_SET, CRAWL_ANIM_FWD, 1.0)
     end
 
-    if IsEntityPlayingAnim(ped, CRAWL_DICT, CRAWL_ANIM_BWD, 3) then
-        StopAnimTask(ped, CRAWL_DICT, CRAWL_ANIM_BWD, 1.0)
+    if IsEntityPlayingAnim(ped, CRAWL_SET, CRAWL_ANIM_BWD, 3) then
+        StopAnimTask(ped, CRAWL_SET, CRAWL_ANIM_BWD, 1.0)
     end
 
     FreezeEntityPosition(ped, false)
