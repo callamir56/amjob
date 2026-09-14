@@ -137,6 +137,18 @@ end
 
 exports('GetWeaponLabel', weaponLabel)
 
+-- Explicit UNCONSCIOUS / FINAL DEAD separation for other scripts:
+--   UNCONSCIOUS: IsDowned() true,  IsFinished() false
+--   FINAL DEAD:  IsDowned() false, IsFinished() true
+--   REVIVED:     both false
+exports('IsDowned', function()
+    return state == State.DOWNED
+end)
+
+exports('IsFinished', function()
+    return state == State.FINISHED
+end)
+
 local function downedHealth()
     return tonumber((Config.DeathSystem and Config.DeathSystem.DownedHealth)
         or (Config.Health and Config.Health.DownedHealth)) or 110
@@ -241,6 +253,11 @@ local function applyDownedLimp(ped)
         -- Full GTA V physics ragdoll, type 0 (CTaskNMRelax - the networked
         -- type). Duration -1 keeps the body limp until the state ends.
         SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
+    else
+        -- Ragdoll healthy: refresh its timer so it can never expire into a
+        -- get-up animation. This is a keep-alive, NOT a restart - no twitch,
+        -- no teleport, no state churn.
+        ResetPedRagdollTimer(ped)
     end
 end
 
@@ -599,6 +616,14 @@ CreateThread(function()
                 applyDownedLimp(ped)
             elseif isCarried or isTreated or isBeingExecuted then
                 lastHealth = GetEntityHealth(ped)
+
+                -- The execution window leaves the body untouched for several
+                -- seconds: keep its ragdoll timer alive so it can never
+                -- expire into a get-up mid-execution. Harmless no-op when
+                -- the ped is carried or treated (no ragdoll active then).
+                if IsPedRagdoll(ped) then
+                    ResetPedRagdollTimer(ped)
+                end
             else
                 local health = GetEntityHealth(ped)
 
@@ -648,34 +673,50 @@ CreateThread(function()
             -- settle. Freezing the moment the ragdoll starts - while the
             -- body may still be upright - locks the ped STANDING and
             -- frozen (the reported FINISH -> STAND -> FREEZE bug). A merely
-            -- DOWNED player must never be frozen at all. While the latch
-            -- holds, no freeze/ragdoll native is called every frame.
+            -- DOWNED player must never be frozen at all.
+            --
+            -- The lost-ragdoll correction below runs OUTSIDE the freeze
+            -- latch on purpose: if anything ever clears the finished
+            -- ragdoll (an external task clear, CPR/carry touching a finished
+            -- body, a duplicate finish broadcast), the body is unfreezed,
+            -- dropped again and the freeze re-stages - it can never get
+            -- stuck standing.
             if IsPedInAnyVehicle(ped, false) then
                 -- Inside a vehicle there is no fall to stage: freeze once.
                 if not finishedPoseFrozen then
                     FreezeEntityPosition(ped, true)
                     finishedPoseFrozen = true
                 end
+            elseif not IsPedRagdoll(ped) or IsPedGettingUp(ped) then
+                -- No ragdoll physics: the body stood up (or is getting up) -
+                -- release any freeze, remove whatever took over, drop the
+                -- body again and restart the settle timer. Conditional
+                -- correction only: runs until the ragdoll engages (normally
+                -- a single frame), never as a per-frame restart loop.
+                finishedPoseFrozen = false
+                finishedGroundedAt = 0
+                FreezeEntityPosition(ped, false)
+                ClearPedTasksImmediately(ped)
+                SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
             elseif not finishedPoseFrozen then
-                if IsPedRagdoll(ped) then
-                    if finishedGroundedAt == 0 then
-                        finishedGroundedAt = now
-                    elseif now - finishedGroundedAt >= 2000 then
-                        -- Ragdoll active for 2s: the body has hit the ground
-                        -- and settled - freeze the pose in place, once.
-                        FreezeEntityPosition(ped, true)
-                        finishedPoseFrozen = true
-                    end
-                    -- else: ragdoll active but the body is still falling or
-                    -- settling - wait. Neither freeze nor restart anything.
-                else
-                    -- No ragdoll physics: the body stood up - drop it again
-                    -- and restart the settle timer. This runs only until the
-                    -- ragdoll engages (normally a single frame), never as a
-                    -- per-frame restart loop.
-                    finishedGroundedAt = 0
-                    SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
+                -- Ragdoll active but not frozen yet: keep its timer alive
+                -- while the body falls and settles.
+                ResetPedRagdollTimer(ped)
+
+                if finishedGroundedAt == 0 then
+                    finishedGroundedAt = now
+                elseif now - finishedGroundedAt >= 2000 then
+                    -- Ragdoll active for 2s: the body has hit the ground
+                    -- and settled - freeze the pose in place, once.
+                    FreezeEntityPosition(ped, true)
+                    finishedPoseFrozen = true
                 end
+                -- else: ragdoll active but the body is still falling or
+                -- settling - wait. Neither freeze nor restart anything.
+            else
+                -- Latched: the ONLY per-frame call. Refreshes the ragdoll
+                -- timer so it can never expire into a get-up while frozen.
+                ResetPedRagdollTimer(ped)
             end
         end
     end

@@ -115,6 +115,7 @@ end
 
 -- The shared finish routine. Only the server flips the finished state.
 local hospitalRespawn
+local scheduleHospitalRespawn
 
 -- ---------------------------------------------------------------
 -- Reconnect persistence (server-side, identifier-keyed)
@@ -302,13 +303,10 @@ Framework.CreateCallback('amb_server:getPersistedDeathState', function(_, cb)
 
         broadcastFinished(src, true)
 
-        -- Fresh hospital clock for the restored corpse, matching the fresh
-        -- mercy timer the client shows.
-        if respawnEnabled() then
-            SetTimeout(respawnSeconds() * 1000, function()
-                hospitalRespawn(src)
-            end)
-        end
+        -- Fresh hospital clock for the restored corpse (downedAt was reset
+        -- above, so this schedules a full fresh duration), matching the
+        -- fresh mercy timer the client shows.
+        scheduleHospitalRespawn(src)
     end
 
     -- Restored DOWNED needs nothing else here: the client's enterDowned echo
@@ -362,13 +360,30 @@ local function finishPlayer(src, reason, killerSrc, killerWeapon)
     print(('^2[DEATH]^7 Player %s was FINISHED (reason: %s, killer: %s).'):format(
         tostring(src), tostring(reason), tostring(killer.src or 'UNKNOWN')))
 
-    if respawnEnabled() then
-        SetTimeout(respawnSeconds() * 1000, function()
-            hospitalRespawn(src)
-        end)
-    end
+    scheduleHospitalRespawn(src)
 
     return true
+end
+
+-- Hospital respawn is scheduled against the CONTINUOUS death clock (downed
+-- moment + RespawnSeconds), so it lands exactly when the client's
+-- never-resetting display reaches 00:00 - FINISH does not restart the
+-- timer. A small grace keeps an already-expired clock from respawning in
+-- the same instant as the finish.
+scheduleHospitalRespawn = function(src)
+    if not respawnEnabled() then
+        return
+    end
+
+    local remaining = respawnSeconds() - elapsedSinceDown(src)
+
+    if remaining < 5 then
+        remaining = 5
+    end
+
+    SetTimeout(math.floor(remaining * 1000), function()
+        hospitalRespawn(src)
+    end)
 end
 
 hospitalRespawn = function(src)

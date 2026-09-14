@@ -3,6 +3,11 @@ local deathTimer = 0
 local emsCalled = false
 local deathMode = 'dead'
 local deathStartTime = 0
+-- ONE fixed end timestamp for the whole death (set once when the death
+-- screen opens, adjusted once from the server clock). Both the unconscious
+-- countdown and the finished display derive from it, so the timer can never
+-- reset - not every frame, not on FINISH. Never recreated in any loop.
+local deathEndTime = 0
 local transportDelay = 120
 local mercyFinished = false
 local bleedOutSent = false
@@ -113,16 +118,22 @@ local function applyDeathControls()
         return
     end
 
-    -- Crawl phase (unconscious): the player CAN move (crawling on the
-    -- ground) and look around, but cannot fight. [G] (47) stays disabled so
-    -- the call-EMS detection below keeps working; [Y] (246) stays disabled
-    -- because hospital transport is not part of this phase.
+    -- UNCONSCIOUS: block combat / vehicle / action controls ONLY. Everything
+    -- else - look, move, and in particular the LB Phone key - keeps working.
+    -- (The body is a physics ragdoll, so movement inputs cannot move it
+    -- anyway.) DisableAllControlActions must NOT be used here: it would
+    -- prevent LB Phone from opening.
+    -- [G] (47) CALL EMS stays disabled only until EMS is called, so the
+    -- IsDisabledControlPressed detection below keeps working; afterwards the
+    -- key is freed for the phone or anything else. [H] (74) give-up and
+    -- [Y] (246) transport stay disabled for the same detection.
     if deathMode == 'unconscious' and not mercyFinished then
-        DisableAllControlActions(0)
-
-        for _, control in ipairs({ 1, 2, 30, 31, 32, 33, 34, 35, 36 }) do
-            EnableControlAction(0, control, true)
+        for _, control in ipairs({ 21, 22, 23, 24, 25, 36, 37, 44, 45, 71, 72,
+            73, 74, 75, 140, 141, 142, 143, 246, 257, 263, 264 }) do
+            DisableControlAction(0, control, true)
         end
+
+        DisableControlAction(0, 47, not emsCalled)
 
         return
     end
@@ -263,22 +274,27 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
     local elapsed = math.max(0, tonumber(elapsedSeconds) or 0)
 
     bleedOutSent = medicalState == Framework.MedicalState.DEAD
-    deathTimer = math.max(0, (tonumber(Config.Health.DeathTimer) or 300) - math.floor(elapsed))
+    deathTimer = math.max(0, (deathSystemActive() and deathTimerSeconds()
+        or (tonumber(Config.Health.DeathTimer) or 300)) - math.floor(elapsed))
     deathStartTime = GetGameTimer() - math.floor(elapsed * 1000)
+    deathEndTime = 0
     transportDelay = tonumber(Config.Health.HospitalTransportDelay) or 120
 
     toggleDeathScreen(true, deathTimer, deathMode)
 
-    -- Accurate countdown: the remaining time is recomputed from a fixed
-    -- endTime every tick (GetGameTimer is engine time, so lag / freezes
-    -- cannot drift it), and the start point is the server-authoritative
-    -- downed time.
+    -- Accurate, CONTINUOUS countdown: the remaining time is recomputed from
+    -- ONE fixed end timestamp every tick (GetGameTimer is engine time, so
+    -- lag / freezes cannot drift it), and the start point is the
+    -- server-authoritative downed time. The timestamp is set once here and
+    -- adjusted once from the server - never recreated, never reset, and the
+    -- countdown keeps ticking through FINISH (finished mode shows the same
+    -- clock running out, it does not restart it).
     CreateThread(function()
         local durationSeconds = deathSystemActive()
             and deathTimerSeconds()
             or (tonumber(Config.Health.DeathTimer) or 300)
 
-        local endTime = GetGameTimer() + durationSeconds * 1000
+        deathEndTime = GetGameTimer() + durationSeconds * 1000
 
         -- Ask the server how long we have been downed already.
         if deathSystemActive() then
@@ -289,7 +305,7 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
 
                 local elapsed = math.max(0, tonumber(serverElapsed) or 0)
 
-                endTime = GetGameTimer() + math.max(0, (durationSeconds - elapsed)) * 1000
+                deathEndTime = GetGameTimer() + math.max(0, (durationSeconds - elapsed)) * 1000
             end)
         end
 
@@ -298,41 +314,39 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
         while deathScreenActive do
             Wait(250)
 
-            if mercyFinished then
-                -- The finished mode manages its own display.
-            else
-                local remaining = math.ceil((endTime - GetGameTimer()) / 1000)
+            local remaining = math.ceil((deathEndTime - GetGameTimer()) / 1000)
 
-                if remaining < 0 then
-                    remaining = 0
-                end
+            if remaining < 0 then
+                remaining = 0
+            end
 
-                if remaining ~= lastSent then
-                    lastSent = remaining
+            if remaining ~= lastSent then
+                lastSent = remaining
 
-                    SendNUIMessage({
-                        action = 'amb_updateDeathTimer',
-                        time = remaining
-                    })
-                end
+                SendNUIMessage({
+                    action = 'amb_updateDeathTimer',
+                    time = remaining
+                })
+            end
 
-                if remaining <= 0 and not bleedOutSent then
-                    bleedOutSent = true
+            -- Bleed out only applies while still downed: a finished player
+            -- already has their outcome, the server handles the respawn.
+            if remaining <= 0 and not bleedOutSent and not mercyFinished then
+                bleedOutSent = true
 
-                    if deathSystemActive() then
-                        -- Bleed out: the server verifies the elapsed time.
-                        TriggerServerEvent('amb_server:finishPlayer', 'timer')
-                    else
-                        TriggerServerEvent('amb_server:bleedOut')
+                if deathSystemActive() then
+                    -- Bleed out: the server verifies the elapsed time.
+                    TriggerServerEvent('amb_server:finishPlayer', 'timer')
+                else
+                    TriggerServerEvent('amb_server:bleedOut')
 
-                        if deathMode ~= 'dead' then
-                            deathMode = 'dead'
+                    if deathMode ~= 'dead' then
+                        deathMode = 'dead'
 
-                            toggleDeathScreen(true, 0, deathMode)
+                        toggleDeathScreen(true, 0, deathMode)
 
-                            if emsCalled then
-                                SendNUIMessage({ action = 'amb_emsCalled' })
-                            end
+                        if emsCalled then
+                            SendNUIMessage({ action = 'amb_emsCalled' })
                         end
                     end
                 end
@@ -442,6 +456,7 @@ RegisterNetEvent('amb_client:onPlayerRevive', function()
     bleedOutSent = false
     mercyFinished = false
     deathMode = 'dead'
+    deathEndTime = 0
 
     local ped = PlayerPedId()
 
@@ -629,8 +644,17 @@ AddEventHandler('amb_client:finishedStateChanged', function(src, finished)
     end
 
     deathMode = 'dead'
-    deathTimer = math.max(60, tonumber((Config.DeathSystem and Config.DeathSystem.RespawnSeconds)
-        or (Config.Mercy and Config.Mercy.RespawnSeconds)) or 600)
+
+    -- FINISH must NOT reset the clock: keep showing the same countdown that
+    -- was already running (the thread above keeps ticking it down to zero).
+    -- Only when no clock exists yet (finish without a prior death screen)
+    -- fall back to the full duration; the thread corrects it within a tick.
+    if deathEndTime > 0 then
+        deathTimer = math.max(0, math.ceil((deathEndTime - GetGameTimer()) / 1000))
+    else
+        deathTimer = math.max(60, tonumber((Config.DeathSystem and Config.DeathSystem.RespawnSeconds)
+            or (Config.Mercy and Config.Mercy.RespawnSeconds)) or 600)
+    end
 
     toggleDeathScreen(true, deathTimer, 'dead')
 
