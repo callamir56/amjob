@@ -50,6 +50,7 @@
     "ems_notified": "EMS has been notified of your location.",
     "wait_before_calling": "You must wait before calling EMS ({seconds}s)",
     "transported_to_hospital": "You have been transported to hospital.",
+    "hospital_respawn_wiped": "You woke up in front of the hospital - all your items were lost.",
     "no_checkin_bed": "No hospital check-in bed is configured.",
     "transport_available_in": "Hospital transport available in {seconds}s",
     "diagnosis_no_patient_id": "Could not detect patient ID. Try again.",

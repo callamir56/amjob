@@ -28,6 +28,10 @@ local killerInfo = {}
 local executingPlayers = {}
 local executingTargets = {}
 
+-- Server-issued permission for the ONLY legitimate FINISHED -> ALIVE transition.
+-- Normal revive events are never allowed to clear FINISHED.
+local hospitalRespawnAuthorized = {}
+
 local function deathSystemEnabled()
     return not (Config.DisableDeathSystem == true
         or (Config.DeathSystem and Config.DeathSystem.Enabled == false))
@@ -57,8 +61,11 @@ local function respawnEnabled()
     return not (Config.DeathSystem and Config.DeathSystem.RespawnEnabled == false)
 end
 
+-- Time the player must remain FINISHED before the hospital respawn.
+-- Keep this separate from DeathTimer so testing DeathTimer=10 does NOT make
+-- a FINISHED player instantly respawn. Default is 5 minutes.
 local function respawnSeconds()
-    return math.max(30, tonumber(Config.DeathSystem and Config.DeathSystem.RespawnSeconds) or 600)
+    return math.max(1, tonumber(Config.DeathSystem and Config.DeathSystem.FinishedRespawnSeconds) or 300)
 end
 
 local function isFinished(src)
@@ -155,7 +162,7 @@ local function deathStateKey(identifier)
 end
 
 local function dbFetchRow(identifier)
-    if MySQL_Sync == nil or MySQL_Sync.fetchAll == nil then
+    if MySQL == nil or MySQL.Sync == nil or MySQL.Sync.fetchAll == nil then
         return nil
     end
 
@@ -365,23 +372,18 @@ local function finishPlayer(src, reason, killerSrc, killerWeapon)
     return true
 end
 
--- Hospital respawn is scheduled against the CONTINUOUS death clock (downed
--- moment + RespawnSeconds), so it lands exactly when the client's
--- never-resetting display reaches 00:00 - FINISH does not restart the
--- timer. A small grace keeps an already-expired clock from respawning in
--- the same instant as the finish.
+-- Hospital respawn is scheduled FROM THE MOMENT OF FINISH.
+-- This is intentionally separate from the DeathTimer/downed clock: if a
+-- player FINISHES after 10 seconds for testing, they still remain FINISHED
+-- for the full configured 5 minutes before hospital respawn.
 scheduleHospitalRespawn = function(src)
     if not respawnEnabled() then
         return
     end
 
-    local remaining = respawnSeconds() - elapsedSinceDown(src)
+    local waitSeconds = respawnSeconds()
 
-    if remaining < 5 then
-        remaining = 5
-    end
-
-    SetTimeout(math.floor(remaining * 1000), function()
+    SetTimeout(math.floor(waitSeconds * 1000), function()
         hospitalRespawn(src)
     end)
 end
@@ -396,19 +398,33 @@ hospitalRespawn = function(src)
         return
     end
 
+    -- FINISHED hospital respawn ALWAYS wipes the ENTIRE ox_inventory: every
+    -- item in every slot (weapons and money included - everything is an
+    -- ox_inventory item). Called directly on the export so a finished
+    -- player can never keep anything by accident; the result is logged.
     if GetResourceState('ox_inventory') == 'started' then
         if Config.Mercy and Config.Mercy.DropInventory == true then
             pcall(function()
                 exports.ox_inventory:CreateDropFromPlayer(src)
             end)
-        elseif not Config.Mercy or Config.Mercy.ClearInventory ~= false then
-            pcall(function()
-                if Inventory and Inventory.Clear then
-                    Inventory.Clear(src)
-                end
+        else
+            local wiped = pcall(function()
+                exports.ox_inventory:ClearInventory(src)
             end)
+
+            if not wiped and Inventory and Inventory.Clear then
+                wiped = pcall(Inventory.Clear, src)
+            end
+
+            print(('^2[DEATH]^7 Player %s inventory wipe on hospital respawn: %s.'):format(
+                tostring(src), wiped and 'OK' or 'FAILED'))
         end
     end
+
+    -- Mark this as the only legitimate FINISHED -> ALIVE transition.
+    -- The client will accept amb_client:finishedRespawn only after this flag
+    -- has been issued by the server.
+    hospitalRespawnAuthorized[src] = true
 
     finishedPlayers[src] = nil
 
@@ -421,7 +437,8 @@ hospitalRespawn = function(src)
         exports.plt_ambulance_job:InternalRevive(src)
     end)
 
-    TriggerClientEvent('amb_client:finishedRespawn', src)
+    TriggerClientEvent('amb_client:authorizeFinishedRespawn', src)
+    TriggerClientEvent('amb_client:finishedRespawn', src, true)
 
     print(('^2[DEATH]^7 Player %s hospital respawn: inventory wiped, revived and teleported.'):format(
         tostring(src)))
@@ -453,6 +470,15 @@ RegisterNetEvent('amb_server:SetDowned', function(downed)
         -- right after going down. A finished player stays 'finished'.
         persistDeathState(src, finishedPlayers[src] and 'finished' or 'downed')
     else
+        -- CRITICAL STATE-MACHINE GUARD:
+        -- A FINISHED player cannot be revived by a generic SetDowned(false)
+        -- emitted by another health/EMS resource. FINISHED may only become
+        -- ALIVE through hospitalRespawn() (or the explicit debug clear).
+        if finishedPlayers[src] then
+            print(('^1[DEATH]^7 Ignored amb_server:SetDowned(false) for FINISHED player %s.'):format(tostring(src)))
+            return
+        end
+
         -- A real revive reached the server: the persisted state is cleared,
         -- the player truly lives again.
         clearPersistedDeathState(src)
@@ -786,6 +812,7 @@ AddEventHandler('playerDropped', function(reason)
     -- reconnect restore reads it back. Only a real revive clears it. The
     -- in-memory tables below are still wiped to avoid leaking stale src keys.
     finishedPlayers[src] = nil
+    hospitalRespawnAuthorized[src] = nil
     downedAt[src] = nil
     killerInfo[src] = nil
 
@@ -850,6 +877,8 @@ RegisterNetEvent('amb_server:clearFinished', function()
     pcall(function()
         exports.plt_ambulance_job:InternalRevive(src)
     end)
+
+    TriggerClientEvent('amb_client:debugRespawn', src)
 
     Framework.Notify(src, 'Death state cleared (debug).', 'success')
 

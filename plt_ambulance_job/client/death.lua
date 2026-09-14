@@ -50,6 +50,9 @@ local lastAttackerEntity = 0
 local lastDamageWeapon = 0
 local restoreRequested = false -- reconnect restore runs once per session
 
+-- Only the server may authorize the final hospital respawn.
+local hospitalRespawnAuthorized = false
+
 -- Common weapon hashes -> display labels (UI shows UNKNOWN for the rest).
 local WEAPON_LABELS = {
     [-1569615261] = 'Unarmed',
@@ -485,7 +488,9 @@ local function enterFinished(reason)
     -- reported bug). The FINISHED loop below freezes only once the body is
     -- confirmed on the ground.
     finishedPoseFrozen = false
-    finishedGroundedAt = 0
+    -- Start the one-time corpse settle window now. We do not keep restarting
+    -- ragdoll if another script momentarily changes the ped task.
+    finishedGroundedAt = GetGameTimer()
     dropLifeless(ped)
 
     markDowned()
@@ -541,6 +546,9 @@ local function enforceDownedControls()
     DisableControlAction(0, 257, true) -- attack 2
     DisableControlAction(0, 263, true) -- melee attack 1
     DisableControlAction(0, 264, true) -- melee attack 2
+    DisableControlAction(0, 245, true) -- T / MP text chat
+    DisableControlAction(0, 246, true) -- Y / push-to-talk / chat-related input
+    DisableControlAction(0, 303, true) -- U / multiplayer info
 
     DisablePlayerFiring(PlayerId(), true)
 end
@@ -661,62 +669,39 @@ CreateThread(function()
             lastHealth = downedHealth()
 
             DisableAllControlActions(0)
+            DisableControlAction(0, 245, true) -- T / MP text chat
+            DisableControlAction(0, 246, true) -- Y / chat-related input
+            DisableControlAction(0, 303, true) -- U / multiplayer info
             DisablePlayerFiring(PlayerId(), true)
             SetPedCanPlayAmbientAnims(ped, false)
             SetPedCanPlayAmbientBaseAnims(ped, false)
             SetBlockingOfNonTemporaryEvents(ped, true)
 
-            -- FINAL DEAD = FULLY IMMOBILE: the ONLY state allowed to freeze.
-            -- But the freeze engages ONCE, and only after the body is
-            -- CONFIRMED lying on the ground: ragdoll physics must stay
-            -- continuously active long enough for the body to fall and
-            -- settle. Freezing the moment the ragdoll starts - while the
-            -- body may still be upright - locks the ped STANDING and
-            -- frozen (the reported FINISH -> STAND -> FREEZE bug). A merely
-            -- DOWNED player must never be frozen at all.
-            --
-            -- The lost-ragdoll correction below runs OUTSIDE the freeze
-            -- latch on purpose: if anything ever clears the finished
-            -- ragdoll (an external task clear, CPR/carry touching a finished
-            -- body, a duplicate finish broadcast), the body is unfreezed,
-            -- dropped again and the freeze re-stages - it can never get
-            -- stuck standing.
+            -- FINAL DEAD = fully immobile. Let the ragdoll fall for a short
+            -- moment, then freeze the exact corpse pose. Do NOT continuously
+            -- clear tasks/restart ragdoll: doing that makes the ped repeatedly
+            -- stand up -> fall down -> stand up.
             if IsPedInAnyVehicle(ped, false) then
-                -- Inside a vehicle there is no fall to stage: freeze once.
                 if not finishedPoseFrozen then
                     FreezeEntityPosition(ped, true)
                     finishedPoseFrozen = true
                 end
-            elseif not IsPedRagdoll(ped) or IsPedGettingUp(ped) then
-                -- No ragdoll physics: the body stood up (or is getting up) -
-                -- release any freeze, remove whatever took over, drop the
-                -- body again and restart the settle timer. Conditional
-                -- correction only: runs until the ragdoll engages (normally
-                -- a single frame), never as a per-frame restart loop.
-                finishedPoseFrozen = false
-                finishedGroundedAt = 0
-                FreezeEntityPosition(ped, false)
-                ClearPedTasksImmediately(ped)
-                SetPedToRagdoll(ped, -1, -1, 0, false, false, false)
             elseif not finishedPoseFrozen then
-                -- Ragdoll active but not frozen yet: keep its timer alive
-                -- while the body falls and settles.
-                ResetPedRagdollTimer(ped)
-
+                -- One-time settle window. The ragdoll was started by
+                -- enterFinished(); NEVER ClearPedTasks/SetPedToRagdoll in a
+                -- repeating correction loop, otherwise the ped can visibly
+                -- stand up and fall down over and over.
                 if finishedGroundedAt == 0 then
                     finishedGroundedAt = now
-                elseif now - finishedGroundedAt >= 2000 then
-                    -- Ragdoll active for 2s: the body has hit the ground
-                    -- and settled - freeze the pose in place, once.
+                end
+
+                if now - finishedGroundedAt >= 1200 then
                     FreezeEntityPosition(ped, true)
                     finishedPoseFrozen = true
                 end
-                -- else: ragdoll active but the body is still falling or
-                -- settling - wait. Neither freeze nor restart anything.
             else
-                -- Latched: the ONLY per-frame call. Refreshes the ragdoll
-                -- timer so it can never expire into a get-up while frozen.
-                ResetPedRagdollTimer(ped)
+                -- Stable FINISHED corpse: absolutely no movement/actions.
+                FreezeEntityPosition(ped, true)
             end
         end
     end
@@ -811,6 +796,11 @@ RegisterNetEvent('amb_client:executionStopped', function()
 end)
 
 RegisterNetEvent('amb_client:setCarried', function(carried)
+    if state == State.FINISHED then
+        isCarried = false
+        return
+    end
+
     isCarried = carried == true
 
     -- The limp ragdoll must not fight the carry; the controller re-asserts
@@ -825,6 +815,10 @@ RegisterNetEvent('amb_client:setCarried', function(carried)
 end)
 
 RegisterNetEvent('amb_client:syncCPRAnimation', function()
+    if state ~= State.DOWNED then
+        return
+    end
+
     isTreated = true
 
     -- End the limp ragdoll while CPR is running; it comes back once it ends.
@@ -849,6 +843,14 @@ RegisterNetEvent('amb_client:stopCPRAnimation', function()
 end)
 
 AddEventHandler('amb_client:onPlayerRevive', function()
+    -- NEVER let a generic EMS/health revive clear FINISHED. The only legal
+    -- FINISHED -> ALIVE transition is amb_client:finishedRespawn, issued by
+    -- the server after the hospital timer expires.
+    if state == State.FINISHED then
+        print('^1[DEATH]^7 Blocked generic revive: player is FINISHED.')
+        return
+    end
+
     state = State.ALIVE
     downedAt = 0
     isCarried = false
@@ -880,7 +882,17 @@ AddEventHandler('amb_client:onPlayerRevive', function()
     print('^2[DEATH]^7 revived, state reset to ALIVE.')
 end)
 
-RegisterNetEvent('amb_client:finishedRespawn', function()
+RegisterNetEvent('amb_client:authorizeFinishedRespawn', function()
+    hospitalRespawnAuthorized = true
+end)
+
+RegisterNetEvent('amb_client:finishedRespawn', function(authorized)
+    if authorized ~= true or hospitalRespawnAuthorized ~= true then
+        print('^1[DEATH]^7 Blocked unauthorized finishedRespawn event.')
+        return
+    end
+
+    hospitalRespawnAuthorized = false
     state = State.ALIVE
     downedAt = 0
     isCarried = false
@@ -911,8 +923,39 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
     print('^2[DEATH]^7 hospital respawn done, state reset to ALIVE.')
 end)
 
+RegisterNetEvent('amb_client:debugRespawn', function()
+    hospitalRespawnAuthorized = false
+    state = State.ALIVE
+    downedAt = 0
+    isCarried = false
+    isTreated = false
+    isBeingExecuted = false
+    finishRetries = 0
+
+    DisablePlayerFiring(PlayerId(), false)
+    finishedPoseFrozen = false
+    finishedGroundedAt = 0
+
+    local ped = PlayerPedId()
+    if ped and ped ~= 0 and DoesEntityExist(ped) then
+        ClearPedTasksImmediately(ped)
+        SetEntityInvincible(ped, false)
+        SetEntityProofs(ped, false, false, false, false, false, false, false, false)
+        FreezeEntityPosition(ped, false)
+        SetPedCanRagdoll(ped, true)
+        SetPedCanPlayAmbientAnims(ped, true)
+        SetPedCanPlayAmbientBaseAnims(ped, true)
+        SetBlockingOfNonTemporaryEvents(ped, false)
+        lastHealth = GetEntityHealth(ped)
+    end
+
+    EnableAllControlActions(0)
+    SendNUIMessage({ action = 'amb_toggleDeathScreen', show = false })
+end)
+
 -- Resource (re)start: never leave a player stuck dead / downed / frozen.
 RegisterNetEvent('amb_client:deathSystemReset', function()
+    hospitalRespawnAuthorized = false
     state = State.ALIVE
     downedAt = 0
     isCarried = false

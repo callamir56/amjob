@@ -264,8 +264,9 @@ Config.Carry = {
       * TIMER: server-authoritative elapsed time; when DeathTimer runs out
         the player bleeds out -> final death (FINISHED).
       * FINISHED: completely dead, no revive, no EMS, no actions. If
-        RespawnEnabled, after RespawnSeconds the player respawns in front
-        of the hospital with their entire ox_inventory wiped.
+        RespawnEnabled, after FinishedRespawnSeconds (own 5 minute UI
+        countdown, counted from the moment of finish) the player respawns
+        in front of the hospital with their entire ox_inventory wiped.
       * Revive (EMS) resets every state; disconnect and resource restart
         clean everything up.
 
@@ -307,10 +308,12 @@ Config.DeathSystem = {
     -- Hospital transport while downed (UI button + key). Off for now.
     AllowHospitalTransport = false,
 
-    -- Finished players: hospital respawn after RespawnSeconds with the
-    -- entire ox_inventory wiped.
+    -- Finished players: hospital respawn after FinishedRespawnSeconds with
+    -- the entire ox_inventory wiped. This is SEPARATE from DeathTimer: a
+    -- player FINISHED early still waits the full finished time, and the UI
+    -- shows its own countdown for it (NOT the downed clock).
     RespawnEnabled = true,
-    RespawnSeconds = 600,
+    FinishedRespawnSeconds = 300, -- 5 minutes
 }
 
 -- Mercy (finished) extras: inventory behaviour + hospital spawn.
@@ -318,6 +321,10 @@ Config.Mercy = {
     Enabled = true,
     -- Fallback hospital spawn when no check-in bed is configured.
     HospitalCoords = { x = 307.7, y = -590.8, z = 43.3, h = 0.0 },
+    -- Where a FINISHED player respawns after the finished countdown: right
+    -- IN FRONT of the hospital entrance (never on a check-in bed). Adjust
+    -- to your hospital's front door if you use a custom MLO.
+    FinishedRespawnCoords = { x = 307.7, y = -590.8, z = 43.3, h = 0.0 },
     -- Wipe the player's entire ox_inventory when the mercy timer ends.
     ClearInventory = true,
     -- Legacy behaviour: drop the inventory at the body instead of wiping it.

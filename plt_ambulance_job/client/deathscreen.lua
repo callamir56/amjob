@@ -3,11 +3,15 @@ local deathTimer = 0
 local emsCalled = false
 local deathMode = 'dead'
 local deathStartTime = 0
--- ONE fixed end timestamp for the whole death (set once when the death
--- screen opens, adjusted once from the server clock). Both the unconscious
--- countdown and the finished display derive from it, so the timer can never
--- reset - not every frame, not on FINISH. Never recreated in any loop.
+-- ONE fixed end timestamp for the downed phase (set once when the death
+-- screen opens, adjusted once from the server clock). The unconscious
+-- countdown derives from it, so it can never reset mid-phase. Never
+-- recreated in any loop. FINISHED uses its own finishedEndTime below.
 local deathEndTime = 0
+-- FINISHED has its OWN end timestamp (full finished wait, counted from the
+-- moment of finish - NOT the downed clock). While mercyFinished, the UI
+-- countdown below ticks from this timestamp down to the hospital respawn.
+local finishedEndTime = 0
 local transportDelay = 120
 local mercyFinished = false
 local bleedOutSent = false
@@ -30,6 +34,12 @@ end
 
 local function giveUpSeconds()
     return math.max(0, tonumber(Config.DeathSystem and Config.DeathSystem.GiveUpTime) or 60)
+end
+
+-- Mirrors server/death.lua respawnSeconds() exactly: same key, same default
+-- (300 = 5 minutes), so the UI countdown and the server respawn agree.
+local function finishedRespawnSeconds()
+    return math.max(1, tonumber(Config.DeathSystem and Config.DeathSystem.FinishedRespawnSeconds) or 300)
 end
 
 local function weaponLabelOf(hash)
@@ -314,7 +324,15 @@ RegisterNetEvent('amb_client:onPlayerDeath', function(_, elapsedSeconds, medical
         while deathScreenActive do
             Wait(250)
 
-            local remaining = math.ceil((deathEndTime - GetGameTimer()) / 1000)
+            -- Downed phase: the downed clock. Finished phase: the OWN
+            -- finished clock (full wait from the moment of finish).
+            local target = deathEndTime
+
+            if mercyFinished and finishedEndTime > 0 then
+                target = finishedEndTime
+            end
+
+            local remaining = math.ceil((target - GetGameTimer()) / 1000)
 
             if remaining < 0 then
                 remaining = 0
@@ -457,6 +475,7 @@ RegisterNetEvent('amb_client:onPlayerRevive', function()
     mercyFinished = false
     deathMode = 'dead'
     deathEndTime = 0
+    finishedEndTime = 0
 
     local ped = PlayerPedId()
 
@@ -645,16 +664,12 @@ AddEventHandler('amb_client:finishedStateChanged', function(src, finished)
 
     deathMode = 'dead'
 
-    -- FINISH must NOT reset the clock: keep showing the same countdown that
-    -- was already running (the thread above keeps ticking it down to zero).
-    -- Only when no clock exists yet (finish without a prior death screen)
-    -- fall back to the full duration; the thread corrects it within a tick.
-    if deathEndTime > 0 then
-        deathTimer = math.max(0, math.ceil((deathEndTime - GetGameTimer()) / 1000))
-    else
-        deathTimer = math.max(60, tonumber((Config.DeathSystem and Config.DeathSystem.RespawnSeconds)
-            or (Config.Mercy and Config.Mercy.RespawnSeconds)) or 600)
-    end
+    -- FINISH starts its OWN full countdown (default 5:00), counted from the
+    -- moment of finish - exactly like the server schedules the hospital
+    -- respawn, so 00:00 on this display IS the respawn.
+    local finishedSeconds = finishedRespawnSeconds()
+    finishedEndTime = GetGameTimer() + finishedSeconds * 1000
+    deathTimer = finishedSeconds
 
     toggleDeathScreen(true, deathTimer, 'dead')
 
@@ -680,6 +695,7 @@ end)
 -- revived us; all that is left is walking out of the hospital.
 RegisterNetEvent('amb_client:finishedRespawn', function()
     mercyFinished = false
+    finishedEndTime = 0
 
     local ped = PlayerPedId()
 
@@ -687,7 +703,9 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
         return
     end
 
-    local spot = getClosestCheckInBed()
+    -- A FINISHED player wakes up IN FRONT of the hospital entrance - never
+    -- on a check-in bed inside.
+    local spot = (Config.Mercy and Config.Mercy.FinishedRespawnCoords)
         or (Config.Mercy and Config.Mercy.HospitalCoords)
         or { x = 307.7, y = -590.8, z = 43.3, h = 0.0 }
 
@@ -700,4 +718,5 @@ RegisterNetEvent('amb_client:finishedRespawn', function()
     end)
 
     Framework.Notify(_L('transported_to_hospital'), 'success')
+    Framework.Notify(_L('hospital_respawn_wiped'), 'warning')
 end)
