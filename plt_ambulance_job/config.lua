@@ -277,7 +277,7 @@ Config.DisableDeathSystem = false
 
 Config.DeathSystem = {
     -- The standalone death system (client/server death.lua) was removed.
-    -- Enabled = false activates the resource's own legacy downed/death
+    -- Enabled = true activates the resource's own legacy downed/death
     -- handling in health.lua + the built-in death screen.
     Enabled = false,
 
