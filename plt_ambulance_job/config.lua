@@ -137,7 +137,7 @@ Config.Health = {
     DownedHealth = 110,
     -- How long (ms) a downed player can crawl before passing out, falling and
     -- automatically requesting a medic. 0 disables the crawl phase entirely.
-    CrawlTime = 15000,
+    CrawlTime = 0, -- legacy crawl disabled: downed players go straight down, no crawling.
     MaxInjuryLevel = 5,       
     DeathTimer = 600,         
     UnconsciousTimer = 30,    
@@ -276,7 +276,10 @@ Config.Carry = {
 Config.DisableDeathSystem = false
 
 Config.DeathSystem = {
-    Enabled = true,
+    -- The standalone death system (client/server death.lua) was removed.
+    -- Enabled = false activates the resource's own legacy downed/death
+    -- handling in health.lua + the built-in death screen.
+    Enabled = false,
 
     -- Health a downed player is pinned at (the "1 HP" sliver; the engine
     -- needs it above 100 so it does not auto-kill the ped).

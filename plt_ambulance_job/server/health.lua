@@ -682,6 +682,13 @@ end
 exports('InternalRevive', internalRevive)
 exports('IsPlayerDowned', isPlayerDowned)
 
+-- The standalone death system (server/death.lua) was removed: nobody can
+-- ever be "finished" any more, so this legacy guard always reports false
+-- (carry / search / revive / dispatch all proceed as before).
+exports('IsPlayerFinished', function()
+    return false
+end)
+
 local function killPlayer(src)
     if not src or not isPlayerOnline(src) then
         return false
