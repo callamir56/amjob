@@ -3081,7 +3081,7 @@ RegisterNetEvent('amb_client:stopCPRAnimation', function()
 
     isBeingTreated = false
 
-    if (isDowned or isDeathScreenActive()) and not deathSystemOwnsState() then
+    if isDowned or isDeathScreenActive() then
         enforceDownedPose(ped, GetGameTimer())
     else
         ClearPedTasks(ped)
@@ -3198,26 +3198,23 @@ RegisterNetEvent('amb_client:syncFinishedPlayer', function(src, state)
     TriggerEvent('amb_client:finishedStateChanged', src, state == true)
 
     if state and src == GetPlayerServerId(PlayerId()) then
-        -- If WE are the one who got finished, the crawl phase is over.
+        -- If WE are the one who got finished, the crawl phase is over and the
+        -- body drops lifelessly on the ground: stop whatever pose is playing
+        -- and ragdoll. Finished players never play any animation.
         if isCrawling then
             isCrawling = false
             endCrawlVisuals()
         end
 
-        -- The standalone death system owns the finished pose (a special lying
-        -- animation): its pose must never be cleared or ragdolled here.
-        -- Legacy mode only below.
-        if not deathSystemOwnsState() then
-            local ped = PlayerPedId()
+        local ped = PlayerPedId()
 
-            if ped and ped ~= 0 and DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false) then
-                -- Drop lifeless on the ground: stop whatever pose is playing
-                -- and ragdoll with no animation at all.
-                ClearPedTasksImmediately(ped)
-                SetPedCanRagdoll(ped, true)
-                SetPedCanRagdollFromPlayerImpact(ped, true)
-                SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
-            end
+        if ped and ped ~= 0 and DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false) then
+            -- Drop lifeless on the ground: stop whatever pose is playing and
+            -- ragdoll with no animation at all.
+            ClearPedTasksImmediately(ped)
+            SetPedCanRagdoll(ped, true)
+            SetPedCanRagdollFromPlayerImpact(ped, true)
+            SetPedToRagdoll(ped, 99999999, 99999999, 1, false, false, false)
         end
     end
 end)

@@ -291,8 +291,5 @@
     "being_executed": "You are being executed by {name}!",
     "give_up": "GIVE UP",
     "give_up_locked": "GIVE UP LOCKED ({seconds}s)",
-    "give_up_unavailable": "You cannot give up yet.",
-    "execute_too_far": "You are too far away from the body.",
-    "death_state_cleared": "Death state cleared.",
-    "downed_crawling": "You are down! Crawl to safety or call EMS - you will bleed out in {seconds}s!"
+    "give_up_unavailable": "You cannot give up yet."
 }

@@ -176,11 +176,6 @@ end)
 RegisterNetEvent('amb_server:startCombinedCPR', function(patientId)
     local src = source
 
-    -- A finished player is beyond help: never run CPR on a corpse.
-    if exports.plt_ambulance_job:IsPlayerFinished(tonumber(patientId) or 0) then
-        return
-    end
-
     TriggerClientEvent('amb_client:syncCPRAnimation', patientId, src, 'patient', 'loop')
     TriggerClientEvent('amb_client:syncCPRAnimation', src, patientId, 'ems', 'loop')
 end)
