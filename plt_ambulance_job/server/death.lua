@@ -112,9 +112,28 @@ end
 local hospitalRespawn
 local scheduleHospitalRespawn
 
--- executorSrc/weaponHash are set when the finish came from an execution, so
--- the victim's death screen can show who finished them.
-local function finishPlayer(src, reason, executorSrc, weaponHash)
+-- Records who finished the victim (execution / damage), fully validated.
+-- Client values are never trusted: offline / self / invalid ids are dropped.
+local function attributeKiller(src, killerSrc, weaponHash)
+    killerSrc = tonumber(killerSrc) or 0
+    weaponHash = tonumber(weaponHash) or 0
+
+    if killerSrc <= 0 or killerSrc == src or not isPlayerOnline(killerSrc) then
+        return
+    end
+
+    killerInfo[src] = {
+        src = killerSrc,
+        name = getPlayerName(killerSrc),
+        id = killerSrc,
+        weaponHash = weaponHash,
+        time = os.time(),
+    }
+
+    TriggerClientEvent('amb_client:receiveDeathKiller', src, killerInfo[src])
+end
+
+local function finishPlayer(src, reason)
     if isFinished(src) then
         return false
     end
@@ -123,19 +142,9 @@ local function finishPlayer(src, reason, executorSrc, weaponHash)
 
     hospitalRespawnAuthorized[src] = nil
 
-    if executorSrc and tonumber(executorSrc) then
-        executorSrc = tonumber(executorSrc)
-
-        killerInfo[src] = {
-            src = executorSrc,
-            name = getPlayerName(executorSrc),
-            id = executorSrc,
-            weaponHash = tonumber(weaponHash) or 0,
-            time = os.time(),
-        }
-
-        TriggerClientEvent('amb_client:receiveDeathKiller', src, killerInfo[src])
-    end
+    -- A finished body is no longer "downed": carriers auto-drop it and no
+    -- target interaction (search / carry / execute) is offered any more.
+    TriggerClientEvent('amb_client:syncDownedPlayer', -1, src, false)
 
     broadcastFinished(src, true)
 
@@ -318,16 +327,17 @@ Framework.CreateCallback('amb_server:getDeathElapsed', function(_, cb)
     cb(0)
 end)
 
--- Single timer-driven FINISH path for the client: the client asks, the server
--- validates the timer has really elapsed and finishes the player.
-RegisterNetEvent('amb_server:finishPlayer', function(reason)
+-- FINISH paths for the client: the client asks, the server validates and
+-- finishes the player. Self-finish only (no target parameter), so a cheater
+-- firing this can only ever finish themselves.
+RegisterNetEvent('amb_server:finishPlayer', function(reason, killerSrc, weaponHash)
     local src = source
 
     if not deathSystemEnabled() then
         return
     end
 
-    if reason ~= 'timer' and reason ~= 'giveup' then
+    if reason ~= 'timer' and reason ~= 'giveup' and reason ~= 'damage' then
         return
     end
 
@@ -343,6 +353,14 @@ RegisterNetEvent('amb_server:finishPlayer', function(reason)
     local elapsed = elapsedSinceDown(src)
 
     if elapsed == nil then
+        return
+    end
+
+    -- Fresh damage while DOWNED: finish immediately, no timer check. The
+    -- finisher is attributed (validated) so the death screen shows them.
+    if reason == 'damage' then
+        attributeKiller(src, killerSrc, weaponHash)
+        finishPlayer(src, 'damage')
         return
     end
 
@@ -521,7 +539,9 @@ RegisterNetEvent('amb_server:executePlayer', function(targetId)
         weaponHash = tonumber(currentWeapon) or 0
     end
 
-    if finishPlayer(targetId, 'execute', src, weaponHash) then
+    attributeKiller(targetId, src, weaponHash)
+
+    if finishPlayer(targetId, 'execute') then
         Framework.Notify(src, _L('execute_success'), 'success')
     end
 end)

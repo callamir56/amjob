@@ -19,6 +19,11 @@
         animation, misslamar1dead_body/dead_idle, frozen), no revive, no
         EMS, nothing. Hospital respawn after the finished countdown with
         the whole ox_inventory wiped.
+      * DOWNED means CRAWLING: the player belly-crawls slowly (prone
+        locomotion) and stays vulnerable - ANY further damage (shot again,
+        melee, explosion, ...) FINISHES them on the spot (server validated).
+      * HEADSHOT = instant down: a bullet to the head drops the player to
+        DOWNED right away, even from full health.
 
     Detection does not rely on FiveM damage events: one loop watches the
     player's health every frame, the same way the GTA engine itself
@@ -44,6 +49,22 @@ local FINISHED_ANIM = 'dead_idle'
 local SIT_DICT = 'veh@low@front_ps@idle_duck'
 local SIT_ANIM = 'sit'
 
+-- Belly-crawl locomotion while DOWNED. move_crawl is tried first; if the set
+-- never streams in, the proven injured limp (move_m@injured + stealth, the
+-- legacy mechanism) is used instead - never a stuck standing ped.
+local CRAWL_SET = 'move_crawl'
+local LIMP_SET = 'move_m@injured'
+local CRAWL_SET_WAIT_MS = 2000
+
+-- Head bones: any damage through one of these = instant DOWNED (headshot).
+local HEAD_BONES = {
+    [31086] = true, -- SKEL_Head
+    [12844] = true, -- IK_Head
+    [25260] = true, -- FB_L_Eye_000
+    [27474] = true, -- FB_R_Eye_000
+}
+local HEADSHOT_MIN_DROP = 5
+
 local State = {
     ALIVE = 1,
     DOWNED = 2,
@@ -58,6 +79,11 @@ local isTreated = false
 local isBeingExecuted = false
 local finishedFrozen = false -- finished freeze latches once the lying pose is confirmed
 local nextVehicleSecureAt = 0
+local crawlApplied = false -- a crawl clipset is currently driving locomotion
+local crawlMode = 'none'   -- 'none' | 'prone' | 'limp'
+local crawlProneFailed = false -- sticky per down: move_crawl did not load
+local crawlFallbackAt = 0
+local finishRequestedAt = 0 -- throttle for damage-finish requests
 
 local lastAttackerEntity = 0
 local lastDamageWeapon = 0
@@ -233,6 +259,122 @@ local function stopPose(ped)
     StopAnimTask(ped, SIT_DICT, SIT_ANIM, 1.0)
 end
 
+-- Removes any crawl locomotion (transition only - cheap to call every frame).
+local function removeCrawl(ped)
+    if not crawlApplied then
+        return
+    end
+
+    crawlApplied = false
+    crawlMode = 'none'
+
+    if not ped or ped == 0 or not DoesEntityExist(ped) then
+        return
+    end
+
+    ResetPedMovementClipset(ped, 0.5)
+    SetPedStealthMovement(ped, false, '')
+    SetPedCanPlayAmbientAnims(ped, false)
+    SetPedCanPlayAmbientBaseAnims(ped, false)
+end
+
+-- Applies a crawl clipset once. The lying tasks are stopped first so the
+-- locomotion shows; ambient anims are allowed while crawling so the prone /
+-- limp locomotion plays fully (tasks still win whenever one plays).
+local function applyCrawl(ped, setName, stealth, mode)
+    stopPose(ped)
+
+    SetPedMovementClipset(ped, setName, 0.5)
+    SetPedStealthMovement(ped, stealth, '')
+    SetPedCanPlayAmbientAnims(ped, true)
+    SetPedCanPlayAmbientBaseAnims(ped, true)
+
+    crawlApplied = true
+    crawlMode = mode
+end
+
+-- Unified DOWNED locomotion, safe to call every frame: only transitions act.
+--   treated / carried  -> hands off, CPR / carry own the body
+--   executed / vehicle -> lie still (dead_a) / slumped seat (sit)
+--   free on foot       -> slow belly-crawl (prone set, proven limp fallback)
+local function ensureDownedLocomotion(ped)
+    if state ~= State.DOWNED then
+        return
+    end
+
+    if isTreated or isCarried then
+        return
+    end
+
+    if isBeingExecuted or IsPedInAnyVehicle(ped, false) then
+        removeCrawl(ped)
+        playPose(ped)
+        return
+    end
+
+    if crawlApplied then
+        return
+    end
+
+    local now = GetGameTimer()
+
+    if not crawlProneFailed and HasAnimSetLoaded(CRAWL_SET) then
+        applyCrawl(ped, CRAWL_SET, false, 'prone')
+        print('^3[DEATH]^7 crawling (prone).')
+        return
+    end
+
+    if not crawlProneFailed and now < crawlFallbackAt then
+        RequestAnimSet(CRAWL_SET)
+        playPose(ped) -- lie still while the set streams in
+        return
+    end
+
+    crawlProneFailed = true
+
+    if HasAnimSetLoaded(LIMP_SET) then
+        applyCrawl(ped, LIMP_SET, true, 'limp')
+        print('^3[DEATH]^7 move_crawl unavailable, crawling (injured limp).')
+    else
+        RequestAnimSet(LIMP_SET)
+        playPose(ped) -- lie still while the fallback streams in
+    end
+end
+
+-- Who hit us last (opportunistic, from the damage game event). The server
+-- re-validates: offline / self / invalid ids are ignored there.
+local function currentAttacker()
+    local src = 0
+    local weapon = lastDamageWeapon
+    local attacker = lastAttackerEntity
+
+    if attacker and attacker ~= 0 and DoesEntityExist(attacker) then
+        local playerIndex = NetworkGetPlayerIndexFromPed(attacker)
+
+        if playerIndex ~= -1 and NetworkIsPlayerActive(playerIndex) then
+            src = GetPlayerServerId(playerIndex)
+        end
+    end
+
+    return tonumber(src) or 0, tonumber(weapon) or 0
+end
+
+-- Damage while DOWNED finishes: one request, retried at most every 2s until
+-- the server broadcast flips us to FINISHED.
+local function requestDamageFinish()
+    local now = GetGameTimer()
+
+    if finishRequestedAt ~= 0 and now - finishRequestedAt < 2000 then
+        return
+    end
+
+    finishRequestedAt = now
+
+    local src, weapon = currentAttacker()
+
+    TriggerServerEvent('amb_server:finishPlayer', 'damage', src, weapon)
+end
+
 -- A downed/finished driver must never drive off: lock the vehicle (throttled,
 -- the death screen unlocks it again on revive).
 local function secureVehicle(ped, now)
@@ -384,10 +526,11 @@ local function enterDowned(reason)
     SetEntityHealth(ped, downedHealth())
     lastHealth = downedHealth()
 
-    -- Damage immunity via entity proofs (never invincibility: keeps every
-    -- animation path clean and the engine never force-kills the pinned ped).
+    -- DOWNED stays VULNERABLE on purpose: any further damage finishes the
+    -- player (the loop below detects it). Never invincible: keeps every
+    -- animation path clean.
     SetEntityInvincible(ped, false)
-    SetEntityProofs(ped, true, true, true, true, true, true, true, true)
+    SetEntityProofs(ped, false, false, false, false, false, false, false, false)
 
     DisablePlayerFiring(PlayerId(), true)
 
@@ -405,17 +548,24 @@ local function enterDowned(reason)
     SetPedCanPlayAmbientBaseAnims(ped, false)
     SetBlockingOfNonTemporaryEvents(ped, true)
 
-    -- Special unconscious pose: lying on the ground (slumped in a seat
+    -- DOWNED locomotion: slow belly-crawl on foot (slumped in a seat
     -- inside vehicles - the ped is never dragged out).
+    crawlApplied = false
+    crawlMode = 'none'
+    crawlProneFailed = false
+    crawlFallbackAt = GetGameTimer() + CRAWL_SET_WAIT_MS
+    finishRequestedAt = 0
+    RequestAnimSet(CRAWL_SET)
+    RequestAnimSet(LIMP_SET)
     ensureDict(DOWNED_DICT)
     ensureDict(SIT_DICT)
-    playPose(ped)
+    ensureDownedLocomotion(ped)
     secureVehicle(ped, 0)
 
     markDowned(killerInfo)
     reportKillerToServer(killerInfo)
 
-    Framework.Notify(_L('downed_unconscious', {
+    Framework.Notify(_L('downed_crawling', {
         seconds = math.floor(tonumber(Config.DeathSystem and Config.DeathSystem.DeathTimer) or 600)
     }), 'warning')
 
@@ -455,10 +605,21 @@ local function enterFinished()
     SetPedCanPlayAmbientBaseAnims(ped, false)
     SetBlockingOfNonTemporaryEvents(ped, true)
 
+    -- Crawling is over: back to a static lying body.
+    removeCrawl(ped)
+
     ensureDict(FINISHED_DICT)
     ensureDict(SIT_DICT)
     playPose(ped)
     secureVehicle(ped, 0)
+
+    -- Finished while carried: get off the carrier's back right away (the
+    -- carrier auto-drops through syncDownedPlayer(false) from the server).
+    if isCarried then
+        isCarried = false
+        DetachEntity(ped, true, false)
+        TriggerServerEvent('amb_server:dropCarried', GetPlayerServerId(PlayerId()))
+    end
 
     markDowned()
 
@@ -545,6 +706,17 @@ CreateThread(function()
                 if died or health <= downedThreshold() then
                     -- First death: downed.
                     enterDowned('first death')
+                else
+                    -- HEADSHOT = instant down, even from full health: drop
+                    -- the HP to 0 and go DOWNED right away.
+                    local boneOk, bone = GetPedLastDamageBone(ped)
+
+                    if boneOk and HEAD_BONES[bone] and (lastHealth - health) >= HEADSHOT_MIN_DROP then
+                        SetEntityHealth(ped, 0)
+                        Wait(50) -- one tick of real death: registers cause of death
+                        ped = PlayerPedId()
+                        enterDowned('headshot')
+                    end
                 end
 
                 lastHealth = GetEntityHealth(PlayerPedId())
@@ -552,39 +724,45 @@ CreateThread(function()
                 lastHealth = health
             end
         elseif state == State.DOWNED then
-            -- DOWNED = unconscious body on the ground (special lying
-            -- animation). Never frozen, never standing. Damage does NOT
-            -- finish a downed player: only EXECUTE, the server-validated
-            -- timer or GIVE UP move on to FINISHED.
+            -- DOWNED = crawling body, never frozen, never standing. The
+            -- player stays VULNERABLE: any new damage (shot again, melee,
+            -- explosion, ...) requests an immediate server-validated FINISH.
             FreezeEntityPosition(ped, false)
 
             enforceDownedControls()
+            ensureDownedLocomotion(ped)
 
             if IsPedDeadOrDying(ped, true) or GetEntityHealth(ped) <= 0 then
-                -- Safety net (engine death residue): bring the ped right back
-                -- and keep it DOWNED on the ground - no FINISHED transition.
+                -- Killed while downed: come right back (no wasted screen)
+                -- and finish through the server.
                 ped = resurrectLocalPlayer(ped)
 
                 SetEntityMaxHealth(ped, 200)
                 SetEntityHealth(ped, downedHealth())
                 SetEntityInvincible(ped, false)
-                SetEntityProofs(ped, true, true, true, true, true, true, true, true)
+                SetEntityProofs(ped, false, false, false, false, false, false, false, false)
                 lastHealth = downedHealth()
 
-                playPose(ped)
-            elseif isCarried or isTreated or isBeingExecuted then
-                lastHealth = GetEntityHealth(ped)
+                -- A resurrect wipes locomotion: force a re-apply next frame.
+                crawlApplied = false
+                crawlMode = 'none'
+
+                requestDamageFinish()
             else
                 local health = GetEntityHealth(ped)
 
-                -- Keep the 1 HP pinned while lying unconscious.
-                if health > downedHealth() then
+                if health < downedHealth() then
+                    -- Fresh damage while downed -> FINISH.
+                    lastHealth = health
+                    requestDamageFinish()
+                elseif health > downedHealth() then
+                    -- Never climb above the critical seal without a revive.
                     SetEntityHealth(ped, downedHealth())
+                    lastHealth = downedHealth()
+                else
+                    lastHealth = health
                 end
 
-                lastHealth = downedHealth()
-
-                playPose(ped)
                 secureVehicle(ped, now)
             end
         elseif state == State.FINISHED then
@@ -650,6 +828,11 @@ end)
 RegisterNetEvent('amb_client:executionStarted', function(executorSrc, executorName)
     isBeingExecuted = true
 
+    -- Lie still right away: a victim cannot crawl away from an execution.
+    if state == State.DOWNED then
+        ensureDownedLocomotion(PlayerPedId())
+    end
+
     Framework.Notify(_L('being_executed', {
         name = tostring(executorName or ('Player ' .. tostring(executorSrc or '?')))
     }), 'error')
@@ -666,7 +849,7 @@ RegisterNetEvent('amb_client:executionStopped', function()
     local ped = PlayerPedId()
 
     if ped and ped ~= 0 and DoesEntityExist(ped) then
-        playPose(ped)
+        ensureDownedLocomotion(ped)
     end
 end)
 
@@ -679,12 +862,12 @@ RegisterNetEvent('amb_client:setCarried', function(carried)
 
     isCarried = carried == true
 
-    -- Put down again: lie back into the unconscious pose right away.
+    -- Put down again: crawl again right away.
     if not isCarried and state == State.DOWNED then
         local ped = PlayerPedId()
 
         if ped and ped ~= 0 and DoesEntityExist(ped) then
-            playPose(ped)
+            ensureDownedLocomotion(ped)
         end
     end
 end)
@@ -708,7 +891,7 @@ RegisterNetEvent('amb_client:stopCPRAnimation', function()
     local ped = PlayerPedId()
 
     if ped and ped ~= 0 and DoesEntityExist(ped) then
-        playPose(ped)
+        ensureDownedLocomotion(ped)
     end
 end)
 
@@ -728,6 +911,7 @@ local function releaseBody(ped)
     ResetPedMovementClipset(ped, 0.5)
     ResetPedStrafeClipset(ped)
     ResetPedWeaponMovementClipset(ped)
+    SetPedStealthMovement(ped, false, '')
 
     SetPedCanPlayAmbientAnims(ped, true)
     SetPedCanPlayAmbientBaseAnims(ped, true)
@@ -741,6 +925,10 @@ local function resetStateFlags()
     isBeingExecuted = false
     finishedFrozen = false
     hospitalRespawnAuthorized = false
+    crawlApplied = false
+    crawlMode = 'none'
+    crawlProneFailed = false
+    finishRequestedAt = 0
 
     DisablePlayerFiring(PlayerId(), false)
 end
